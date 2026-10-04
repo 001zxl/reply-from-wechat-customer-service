@@ -17,6 +17,17 @@ def _env(name: str, default: str = "") -> str:
     return (os.environ.get(name) or default).strip()
 
 
+def _env_allow_empty(name: str, default: str = "") -> str:
+    """和 _env 的区别：显式设成空字符串时返回空，而不是回退到默认值。
+
+    有些开关（比如夜间静默）需要"显式设空 = 关掉"的语义，
+    用 _env 的话空字符串会被当成"没设置"，用户想关也关不掉。
+    """
+    if name in os.environ:
+        return os.environ[name].strip()
+    return default
+
+
 @dataclass(frozen=True)
 class WeComConfig:
     corp_id: str = field(default_factory=lambda: _env("WECOM_CORP_ID"))
@@ -87,6 +98,48 @@ class Settings:
     min_reply_interval_seconds: float = field(
         default_factory=lambda: float(_env("MIN_REPLY_INTERVAL_SECONDS", "3") or 3)
     )
+    # ============ 风控（降低被平台判定为机器行为的概率）============
+
+    # 1. 夜间静默：这段时间内不自动发送，只出草稿。空字符串 = 不启用。
+    #    支持跨午夜，例 "22:00-08:00"
+    quiet_hours: str = field(
+        default_factory=lambda: _env_allow_empty("QUIET_HOURS", "22:00-08:00")
+    )
+
+    # 2. 每日自动发送上限（按会话计）
+    auto_reply_max_per_day: int = field(
+        default_factory=lambda: int(_env("AUTO_REPLY_MAX_PER_DAY", "150") or 150)
+    )
+
+    # 3. 随机延迟：发送前等一个区间内的随机时长，避免固定节奏
+    reply_delay_min: float = field(
+        default_factory=lambda: float(_env("REPLY_DELAY_MIN", "1.5") or 1.5)
+    )
+    reply_delay_max: float = field(
+        default_factory=lambda: float(_env("REPLY_DELAY_MAX", "5.0") or 5.0)
+    )
+
+    # 4. 相似度检测：新回复和最近 N 条太像就不自动发（防群发特征）
+    similar_reply_window: int = field(
+        default_factory=lambda: int(_env("SIMILAR_REPLY_WINDOW", "5") or 5)
+    )
+    similar_reply_threshold: float = field(
+        default_factory=lambda: float(_env("SIMILAR_REPLY_THRESHOLD", "0.88") or 0.88)
+    )
+
+    # 5. 异常熔断：连续失败 N 次就暂停该会话一段时间
+    circuit_breaker_failures: int = field(
+        default_factory=lambda: int(_env("CIRCUIT_BREAKER_FAILURES", "3") or 3)
+    )
+    circuit_breaker_cooldown_minutes: int = field(
+        default_factory=lambda: int(_env("CIRCUIT_BREAKER_COOLDOWN_MINUTES", "30") or 30)
+    )
+
+    # 6. 打字节奏：粘贴完成到点发送之间停一下，停多久跟字数相关
+    typing_simulation: bool = field(
+        default_factory=lambda: _env("TYPING_SIMULATION", "1") not in ("0", "false", "no")
+    )
+
     # 截屏类通道的轮询间隔（秒）。OCR 一次约 0.6s，别设太小。
     poll_interval: float = field(
         default_factory=lambda: float(_env("POLL_INTERVAL_SECONDS", "4") or 4)

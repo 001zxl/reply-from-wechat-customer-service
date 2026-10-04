@@ -62,6 +62,12 @@
   .conv:last-child{border-bottom:none}
   .conv .nm{font-size:13px}
   .empty{color:var(--dim);font-size:13px;padding:18px 0;text-align:center}
+  .chatrow{display:flex;align-items:center;gap:8px;padding:6px 0;
+    border-bottom:1px solid var(--line);cursor:pointer;font-size:13px}
+  .chatrow:last-of-type{border-bottom:none}
+  .chatrow input{width:auto;flex-shrink:0}
+  .chatrow .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .chatrow.on .nm{color:var(--ok)}
   .stat{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--dim)}
   .stat b{color:var(--text);font-weight:600}
   .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--line);
@@ -109,6 +115,13 @@
   </section>
 
   <aside>
+    <div class="card">
+      <h2>会话白名单</h2>
+      <div class="row" style="margin:0 0 8px">
+        <button class="primary" id="scanBtn" onclick="scanChats()">扫描微信会话</button>
+      </div>
+      <div id="chatList"><div class="empty">点上面的按钮，扫出微信里的会话</div></div>
+    </div>
     <div class="card">
       <h2>当前模型</h2>
       <div id="modelBox"><div class="empty">加载中…</div></div>
@@ -172,12 +185,82 @@ async function refresh(){
     renderConvOptions(c.items);
     renderStats(s);
     renderModel(m);
+    if(!allowedChats.length){
+      try{ const g = await api('/api/guard/chats'); allowedChats = g.allowed || []; }catch(e){}
+    }
+    if(!scannedChats.length) renderChatList();
   }catch(e){
     const msg = /^401/.test(e.message)
       ? 'APP_TOKEN 不对，请检查右上角'
       : '读取失败：' + e.message;
     $('#queue').innerHTML = '<div class="empty">'+esc(msg)+'</div>';
   }
+}
+
+let scannedChats = [], allowedChats = [];
+
+function renderChatList(){
+  const box = $('#chatList');
+  if(!allowedChats.length && !scannedChats.length){
+    box.innerHTML = '<div class="empty">白名单为空 —— 现在打不开任何会话</div>';
+    return;
+  }
+  const seen = new Set();
+  let html = '';
+  for(const n of allowedChats){
+    seen.add(n);
+    html += `<label class="chatrow on">
+      <input type="checkbox" data-name="${esc(n)}" checked />
+      <span class="nm">${esc(n)}</span><span class="tag d">已允许</span></label>`;
+  }
+  for(const n of scannedChats){
+    if(seen.has(n)) continue;
+    seen.add(n);
+    html += `<label class="chatrow">
+      <input type="checkbox" data-name="${esc(n)}" />
+      <span class="nm">${esc(n)}</span><span class="tag">未允许</span></label>`;
+  }
+  html += `<div class="row">
+    <button class="primary" onclick="applyChats()">保存勾选</button>
+    <button class="ghost" onclick="renderChatList()">取消勾选</button>
+  </div>`;
+  box.innerHTML = html;
+}
+
+async function scanChats(){
+  const btn = $('#scanBtn');
+  btn.disabled = true; btn.textContent = '扫描中…';
+  try{
+    const d = await api('/api/guard/chats');
+    allowedChats = d.allowed || [];
+    scannedChats = d.scanned || [];
+    if(d.scan_error){
+      $('#chatList').innerHTML = `<div class="warnbox">扫描失败：${esc(d.scan_error)}</div>`;
+      setTimeout(renderChatList, 2500);
+    }else{
+      renderChatList();
+    }
+  }catch(e){
+    $('#chatList').innerHTML = `<div class="warnbox">扫描失败：${esc(e.message)}</div>`;
+  }finally{
+    btn.disabled = false; btn.textContent = '扫描微信会话';
+  }
+}
+
+async function applyChats(){
+  const boxes = [...document.querySelectorAll('#chatList input[type=checkbox]')];
+  const want = boxes.filter(b=>b.checked).map(b=>b.dataset.name);
+  const had = allowedChats;
+  const toAdd = want.filter(n=>!had.includes(n));
+  const toDel = had.filter(n=>!want.includes(n));
+  if(!toAdd.length && !toDel.length){ alert('没有变化'); return; }
+  if(toDel.length && !confirm(`确认移出 ${toDel.length} 个会话？移出后程序将无法访问它们。`)) return;
+  try{
+    if(toAdd.length) await api('/api/guard/chats/add', {method:'POST', body: JSON.stringify({names: toAdd})});
+    if(toDel.length) await api('/api/guard/chats/remove', {method:'POST', body: JSON.stringify({names: toDel})});
+    alert(`已添加 ${toAdd.length} 个，移出 ${toDel.length} 个`);
+    await scanChats();
+  }catch(e){ alert('保存失败：'+e.message); }
 }
 
 function renderModel(m){

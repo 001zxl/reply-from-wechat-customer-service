@@ -19,6 +19,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from . import db, models, policy
+from bridge import guard
 from .config import ROOT, settings
 from .pipeline import Pipeline, get_pipeline, set_pipeline
 from .schemas import ConversationMode, IncomingMessage, now_iso
@@ -225,6 +226,82 @@ def _draft_view(row: Any) -> dict[str, Any]:
 
 class SwitchModelRequest(BaseModel):
     id: str = Field(min_length=1, max_length=80)
+
+
+# ======================================================================
+# 会话白名单管理（给不懂技术的人用：点一下就能加）
+# ======================================================================
+class ChatsRequest(BaseModel):
+    names: list[str] = Field(default_factory=list, max_length=200)
+
+
+@app.get("/api/guard/chats")
+async def guard_chats(_: None = Depends(require_token)) -> dict[str, Any]:
+    """列出白名单 + 扫描微信会话列表（用于一键添加）。
+
+    扫描只读会话名，不打开任何会话、不读任何聊天内容。
+    """
+    allowed = guard.allowed_chats()
+    adapter = get_pipeline().adapter
+    scanned: list[str] = []
+    scan_error = ""
+    if hasattr(adapter, "list_conversations"):
+        try:
+            scanned = await asyncio.to_thread(adapter.list_conversations)
+        except Exception as exc:
+            scan_error = f"{type(exc).__name__}: {str(exc)[:150]}"
+    else:
+        scan_error = f"当前通道（{settings.channel}）不支持扫描会话列表"
+
+    return {
+        "mode": guard.mode(),
+        "allowed": allowed,
+        "scanned": scanned,
+        "scanned_not_allowed": [n for n in scanned if not guard.chat_allowed(n)],
+        "scan_error": scan_error,
+    }
+
+
+@app.post("/api/guard/chats/add")
+async def guard_chats_add(
+    req: ChatsRequest,
+    _: None = Depends(require_token),
+) -> dict[str, Any]:
+    added, skipped = [], []
+    for name in req.names:
+        name = (name or "").strip()
+        if not name:
+            continue
+        (added if guard.add_chat(name) else skipped).append(name)
+    log.info("白名单新增 %s 条：%s", len(added), added)
+    return {"added": added, "skipped": skipped, "allowed": guard.allowed_chats()}
+
+
+@app.post("/api/guard/chats/remove")
+async def guard_chats_remove(
+    req: ChatsRequest,
+    _: None = Depends(require_token),
+) -> dict[str, Any]:
+    removed = [n for n in req.names if guard.drop_chat(n)]
+    log.info("白名单移除 %s 条：%s", len(removed), removed)
+    return {"removed": removed, "allowed": guard.allowed_chats()}
+
+
+@app.get("/api/guard/audit")
+async def guard_audit(
+    limit: int = 40,
+    _: None = Depends(require_token),
+) -> dict[str, Any]:
+    path = guard.AUDIT
+    items: list[dict[str, Any]] = []
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").strip().splitlines()[-limit:]:
+            try:
+                items.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    items.reverse()
+    return {"items": items}
 
 
 @app.get("/api/models")

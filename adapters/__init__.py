@@ -19,6 +19,13 @@ def get_adapter(channel: str | None = None):
         from .macos_vision import MacWeChatVisionChannel
 
         return MacWeChatVisionChannel(watch=settings.macos_watch)
+    if name in ("windows_wechat", "windows", "win_vision"):
+        from .windows_vision import WindowsWeChatVisionChannel
+
+        return WindowsWeChatVisionChannel(
+            watch=tuple(x.strip() for x in
+                        __import__("os").environ.get("WECHAT_WIN_WATCH", "").split(",") if x.strip())
+        )
     from .mock_channel import MockChannel
 
     return MockChannel()

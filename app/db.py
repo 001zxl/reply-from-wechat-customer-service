@@ -6,7 +6,7 @@ import json
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
@@ -74,6 +74,12 @@ CREATE TABLE IF NOT EXISTS cases (
   owner           TEXT NOT NULL DEFAULT '',
   created_at      TEXT NOT NULL,
   updated_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS runtime_state (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS model_calls (
@@ -368,6 +374,128 @@ def record_model_call(
             (conv_id, batch_id, model, int(ok), tool_rounds, latency_ms,
              prompt_tokens, completion_tokens, error[:500], now_iso()),
         )
+
+
+# ---------------- 运行时状态（熔断 / 暂停）----------------
+
+def state_get(key: str, default: str = "") -> str:
+    row = _conn().execute("SELECT value FROM runtime_state WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def state_set(key: str, value: str) -> None:
+    with tx() as c:
+        c.execute(
+            """INSERT INTO runtime_state(key, value, updated_at) VALUES(?,?,?)
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+            (key, value, now_iso()),
+        )
+
+
+def state_del(key: str) -> None:
+    with tx() as c:
+        c.execute("DELETE FROM runtime_state WHERE key=?", (key,))
+
+
+# ---------------- 风控用的计数与查询 ----------------
+
+def sent_count_today(conv_id: str) -> int:
+    """今天这个会话自动发了多少条（用于每日上限）。"""
+    today = datetime.now().astimezone().strftime("%Y-%m-%d")
+    rows = _conn().execute(
+        "SELECT sent_at FROM outbox WHERE conversation_id=? AND status='sent' AND sent_at IS NOT NULL",
+        (conv_id,),
+    ).fetchall()
+    n = 0
+    for r in rows:
+        try:
+            if datetime.fromisoformat(r["sent_at"]).astimezone().strftime("%Y-%m-%d") == today:
+                n += 1
+        except (TypeError, ValueError):
+            continue
+    return n
+
+
+def recent_sent_replies(conv_id: str, limit: int = 5) -> list[str]:
+    """最近自动发出去的几条回复内容（用于相似度检测）。"""
+    rows = _conn().execute(
+        """SELECT reply FROM outbox
+            WHERE conversation_id=? AND status='sent' AND reply != ''
+            ORDER BY id DESC LIMIT ?""",
+        (conv_id, limit),
+    ).fetchall()
+    return [r["reply"] for r in rows]
+
+
+def recent_sent_all(minutes: int = 10, limit: int = 80) -> list[tuple[str, str]]:
+    """最近 N 分钟内所有会话发出去的 (会话, 内容)。用于跨会话群发检测。"""
+    cutoff = datetime.now(timezone.utc).timestamp() - minutes * 60
+    rows = _conn().execute(
+        """SELECT conversation_id, reply, sent_at FROM outbox
+            WHERE status='sent' AND reply != '' AND sent_at IS NOT NULL
+            ORDER BY id DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    out = []
+    for r in rows:
+        try:
+            if datetime.fromisoformat(r["sent_at"]).timestamp() >= cutoff:
+                out.append((r["conversation_id"], r["reply"]))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def consecutive_failures(conv_id: str) -> int:
+    raw = state_get(f"cb:{conv_id}")
+    if not raw:
+        return 0
+    try:
+        return int(json.loads(raw).get("failures", 0))
+    except (json.JSONDecodeError, ValueError, AttributeError):
+        return 0
+
+
+def record_send_outcome(conv_id: str, ok: bool) -> int:
+    """记录一次发送结果，返回当前连续失败次数。"""
+    n = 0 if ok else consecutive_failures(conv_id) + 1
+    state_set(f"cb:{conv_id}", json.dumps({"failures": n, "at": now_iso()}))
+    return n
+
+
+def pause_conversation(conv_id: str, minutes: int, reason: str) -> str:
+    """熔断：暂停这个会话的自动发送一段时间。"""
+    until = (datetime.now(timezone.utc) + timedelta(minutes=minutes)).astimezone()
+    state_set(f"paused:{conv_id}", json.dumps(
+        {"until": until.isoformat(timespec="seconds"), "reason": reason[:200]},
+        ensure_ascii=False,
+    ))
+    return until.isoformat(timespec="seconds")
+
+
+def paused_until(conv_id: str) -> Optional[str]:
+    raw = state_get(f"paused:{conv_id}")
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        until = data.get("until", "")
+        if not until:
+            return None
+        dt = datetime.fromisoformat(until)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) >= dt:
+            state_del(f"paused:{conv_id}")     # 到期自动解除
+            return None
+        return until
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def clear_pause(conv_id: str) -> None:
+    state_del(f"paused:{conv_id}")
+    state_del(f"cb:{conv_id}")
 
 
 # ---------------- cases ----------------

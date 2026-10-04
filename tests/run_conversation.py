@@ -25,6 +25,13 @@ os.environ.setdefault("DB_PATH", "data/talk_test.db")
 os.environ.setdefault("LOGISTICS_PROVIDER", "mock")
 os.environ.setdefault("DRY_RUN", "0")
 
+# 测试要固定结果：关掉夜间静默、随机延迟、打字模拟，否则同一个用例
+# 在白天和半夜跑会得到不同结论（风控本来就该这样，但测试需要确定性）
+os.environ["QUIET_HOURS"] = ""
+os.environ["REPLY_DELAY_MIN"] = "0"
+os.environ["REPLY_DELAY_MAX"] = "0"
+os.environ["TYPING_SIMULATION"] = "0"
+
 from app import db  # noqa: E402
 from app.config import load_knowledge, settings  # noqa: E402
 from app.llm import CustomerServiceLLM, looks_like_meta  # noqa: E402

@@ -25,6 +25,13 @@ os.environ["AUTO_REPLY_MAX_PER_MINUTE"] = "100"
 os.environ["MIN_REPLY_INTERVAL_SECONDS"] = "0"
 os.environ["DRY_RUN"] = "0"          # 离线回归要验证真实的发送/拦截分支
 
+# 测试要固定结果：关掉夜间静默、随机延迟、打字模拟，否则同一个用例
+# 在白天和半夜跑会得到不同结论（风控本来就该这样，但测试需要确定性）
+os.environ["QUIET_HOURS"] = ""
+os.environ["REPLY_DELAY_MIN"] = "0"
+os.environ["REPLY_DELAY_MAX"] = "0"
+os.environ["TYPING_SIMULATION"] = "0"
+
 TEST_DB = ROOT / "data" / "simulate.db"
 OUTBOX = ROOT / "data" / "mock_outbox.jsonl"
 
@@ -236,6 +243,67 @@ async def main() -> int:
         "作为网点客服，我这边帮你核实。",
     ]:
         check(f"S13 正常回复不能误判：{good[:16]}…", not looks_like_meta(good))
+
+    # ---------------- S14 六项风控 ----------------
+    from datetime import datetime as _dt
+
+    from app import policy as _policy  # noqa: F811
+    from app import policy as _p
+    from app.schemas import Action, Intent  # noqa: F811
+
+    # 1) 夜间静默（含跨午夜）
+    os.environ["QUIET_HOURS"] = "22:00-08:00"
+    import importlib
+
+    from app import config as _cfg
+    importlib.reload(_cfg)
+    _p.settings = _cfg.settings
+    check("S14 夜间 22:30 判为静默", _p.in_quiet_hours(_dt(2026, 1, 1, 22, 30)))
+    check("S14 凌晨 03:00 判为静默（跨午夜）", _p.in_quiet_hours(_dt(2026, 1, 1, 3, 0)))
+    check("S14 白天 14:00 不算静默", not _p.in_quiet_hours(_dt(2026, 1, 1, 14, 0)))
+    os.environ["QUIET_HOURS"] = "00:00-00:00"
+    importlib.reload(_cfg)
+    _p.settings = _cfg.settings
+    check("S14 起止相同 = 不启用静默", not _p.in_quiet_hours(_dt(2026, 1, 1, 3, 0)))
+    os.environ["QUIET_HOURS"] = ""
+    importlib.reload(_cfg)
+    _p.settings = _cfg.settings
+    check("S14 显式设空 = 关闭静默", not _p.in_quiet_hours(_dt(2026, 1, 1, 3, 0)))
+
+    # 2) 相似度（同会话复读）
+    same = "这票现在在派件中，我帮您催一下派送，有结果回您。"
+    check("S14 同一会话复读会被识别",
+          _p.too_similar(same, [same]) is not None)
+    check("S14 内容不同不误报",
+          _p.too_similar(same, ["好的，地址已经记下来了，稍后回复你。"]) is None)
+    check("S14 太短的回复不做相似判断",
+          _p.too_similar("好的", ["好的"]) is None)
+
+    # 3) 跨会话群发
+    victims = _p.mass_send_hit(same, [("A", same), ("B", same), ("C", same)])
+    check("S14 同一内容发给 3 个会话 = 群发特征", len(victims) >= 3, f"实际 {len(victims)}")
+    check("S14 只发给 2 个会话不算群发",
+          len(_p.mass_send_hit(same, [("A", same), ("B", same)])) < 3)
+    check("S14 内容各不相同不算群发",
+          len(_p.mass_send_hit(same, [("A", "件已到杭州"), ("B", "电话记下了")])) == 0)
+
+    # 4) 每日上限
+    v = _policy.check_send_policy(
+        mode="auto", takeover_until=None, action=Action.reply, intent=Intent.business_inquiry,
+        reply="周末上门取件可以的，提前一小时说一声。", logistics_real=True,
+        auto_sent_last_minute=0, last_auto_sent_at=None, inbound_text="周末能取件吗",
+        sent_today=999,
+    )
+    check("S14 达到每日上限会被拦", not v.allowed, f"reason={v.reason}")
+
+    # 5) 熔断暂停
+    v = _policy.check_send_policy(
+        mode="auto", takeover_until=None, action=Action.reply, intent=Intent.business_inquiry,
+        reply="周末上门取件可以的。", logistics_real=True,
+        auto_sent_last_minute=0, last_auto_sent_at=None, inbound_text="周末能取件吗",
+        paused_until="2099-01-01T00:00:00+08:00",
+    )
+    check("S14 熔断暂停期间不发", not v.allowed, f"reason={v.reason}")
 
     await pipeline.stop()
 

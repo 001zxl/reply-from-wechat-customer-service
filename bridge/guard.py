@@ -48,6 +48,7 @@ ACTION_LABEL = {
     "read_messages": "读取会话消息",
     "snapshot": "截屏读取当前会话",
     "send": "★ 发送消息",
+    "scan_chat_list": "扫描微信会话列表（只读名字，用于配置白名单）",
 }
 
 

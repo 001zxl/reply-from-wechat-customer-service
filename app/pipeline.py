@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 import uuid
 from collections import deque
@@ -87,7 +88,7 @@ class Pipeline:
         self.workers: dict[str, asyncio.Task] = {}
         self._running = False
         self.stats = {"received": 0, "composed": 0, "deduped": 0, "ignored": 0,
-                      "drafts": 0, "sent": 0, "blocked": 0, "unknown": 0, "failed": 0}
+                      "drafts": 0, "sent": 0, "blocked": 0, "unknown": 0, "failed": 0, "paused": 0}
 
     # ---------------- 生命周期 ----------------
     async def start(self) -> None:
@@ -264,6 +265,12 @@ class Pipeline:
             auto_sent_last_minute=db.auto_sent_count_last_minute(conv_id),
             last_auto_sent_at=db.last_auto_sent_at(conv_id),
             inbound_text=batch_text,
+            # 风控参数
+            paused_until=db.paused_until(conv_id),
+            sent_today=db.sent_count_today(conv_id),
+            recent_replies=db.recent_sent_replies(conv_id),
+            recent_all=db.recent_sent_all(),
+            mass_send_max_same=3,
         )
 
         if not allowed.allowed or mock_flag:
@@ -410,8 +417,14 @@ class Pipeline:
             self.stats["drafts"] += 1
             return "draft"
 
+        # ---- 风控 5：随机延迟。固定节奏是典型的机器特征 ----
+        if not manual:
+            delay = random.uniform(settings.reply_delay_min, settings.reply_delay_max)
+            log.debug("随机延迟 %.1fs 后发送", delay)
+            await asyncio.sleep(delay)
+
         if expect_version is not None and int(row["version"]) != expect_version:
-            # 思考期间对方又发了新要求，这条草稿已经过期
+            # 思考期间（含随机延迟期间）对方又发了新要求，这条草稿已经过期
             db.update_draft(draft_id, status="discarded", reason="上下文已变化，草稿作废")
             return "discarded"
 
@@ -446,14 +459,31 @@ class Pipeline:
             if not manual:
                 db.mark_auto_sent(conv_id)
             self.stats["sent"] += 1
+            db.record_send_outcome(conv_id, True)
         elif result.status == "unknown":
             # 结果未知绝不重发，交人工判断
             db.update_draft(draft_id, status="unknown", send_result=result.detail)
             self.stats["unknown"] += 1
+            self._note_failure(conv_id, "发送结果未知")
         else:
             db.update_draft(draft_id, status="failed", send_result=result.detail)
             self.stats["failed"] += 1
+            self._note_failure(conv_id, f"发送失败：{result.detail[:60]}")
         return result.status
+
+    # ---------------- 风控 6：熔断 ----------------
+    def _note_failure(self, conv_id: str, reason: str) -> None:
+        """连续失败到阈值就暂停这个会话，避免一直撞墙。"""
+        n = db.record_send_outcome(conv_id, False)
+        limit = settings.circuit_breaker_failures
+        if n >= limit:
+            until = db.pause_conversation(
+                conv_id, settings.circuit_breaker_cooldown_minutes,
+                f"连续 {n} 次失败：{reason}",
+            )
+            self.stats["paused"] = self.stats.get("paused", 0) + 1
+            log.error("会话 %s 连续 %d 次失败，已熔断暂停至 %s（%s）",
+                      conv_id, n, until, reason)
 
     async def deliver_manual(self, draft_id: int, text: Optional[str] = None) -> str:
         """人工审核台点"发送"。人工操作不再受自动发送策略限制。"""

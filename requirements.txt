@@ -1,4 +1,4 @@
-# --- 核心服务 ---
+# --- 核心服务（全平台） ---
 fastapi>=0.115,<1
 uvicorn[standard]>=0.30,<1
 pydantic>=2.7,<3
@@ -6,17 +6,27 @@ python-dotenv>=1.0,<2
 httpx>=0.27,<1
 openai>=1.60,<3
 
-# --- 企业微信回调加解密（官方通道） ---
+# --- 企业微信回调加解密（官方通道，全平台） ---
 cryptography>=42
 
-# --- macOS 截屏+OCR 通道（读微信界面、模拟鼠标键盘） ---
-# 只在 WECHAT_CHANNEL=macos_wechat 时需要
-pyobjc-framework-Cocoa>=10
-pyobjc-framework-Quartz>=10
-pyobjc-framework-ApplicationServices>=10
-pyobjc-framework-Vision>=10
+# --- 图像处理（两个截屏通道都要） ---
 Pillow>=10
 
-# --- 可选：Windows PC 微信 Hook（实验性，见 README 风险说明） ---
+# --- macOS 截屏通道（只在 macOS 上装） ---
+# WECHAT_CHANNEL=macos_wechat 时需要
+pyobjc-framework-Cocoa>=10 ; sys_platform == "darwin"
+pyobjc-framework-Quartz>=10 ; sys_platform == "darwin"
+pyobjc-framework-ApplicationServices>=10 ; sys_platform == "darwin"
+pyobjc-framework-Vision>=10 ; sys_platform == "darwin"
+
+# --- Windows 截屏通道（只在 Windows 上装） ---
+# WECHAT_CHANNEL=windows_wechat 时需要。
+# ⚠️ 这条通道尚未在真实 Windows 机器上验证，见 README 说明。
+# 先跑 bridge\inspect_wechat_windows.py --check 逐项确认
+pyautogui>=0.9.54 ; sys_platform == "win32"
+pywin32>=306 ; sys_platform == "win32"
+rapidocr-onnxruntime>=1.3 ; sys_platform == "win32"
+
+# --- 可选：旧版 PC 微信 Hook（实验性，仅微信 3.9.x，有封号风险） ---
 # wcferry>=39.3.3
-# pywinauto>=0.6.8        # 只用于 bridge/inspect_wechat.py 控件探测
+# pywinauto>=0.6.8
