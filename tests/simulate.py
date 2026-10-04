@@ -364,13 +364,13 @@ async def main() -> int:
 
     from adapters.macos_vision import title_ok
     check("S12 配置名是真名的前缀时算同一个会话",
-          title_ok("京东生活线报群6禁链接", "京东生活线报群6"))
+          title_ok("某电商福利群6禁广告链接", "某电商福利群6"))
     check("S12 群名带成员数也能匹配",
-          title_ok("大潍坊AI交流群（304）", "大潍坊AI交流群"))
+          title_ok("某某行业交流群（304）", "某某行业交流群"))
     check("S12 过短的前缀不算匹配（防串会话）",
           not title_ok("客户AB群", "客户A"))
     check("S12 完全不同的会话不匹配",
-          not title_ok("大理旅居客", "京东生活线报群6"))
+          not title_ok("某旅居兴趣群", "某电商福利群6"))
 
     # ---------------- 汇总 ----------------
     print("\n" + "=" * 74)
