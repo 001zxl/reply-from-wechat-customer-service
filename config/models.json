@@ -1,0 +1,74 @@
+{
+  "_说明": [
+    "模型配置。交付时对方只需要：① 在 .env 里填对应模型的 API Key ② 把 active 改成想用的那个。",
+    "",
+    "★ 安全约定：这个文件里**只写环境变量名，不写密钥值**。",
+    "  密钥统一放在 .env 里（.gitignore 已排除），这样配置文件可以安全地随项目交付。",
+    "",
+    "id        这个模型的内部标识，切换时用它",
+    "label     给人看的名字",
+    "base_url  接口地址（必须是 OpenAI 兼容的 /v1 接口）",
+    "model     要传给接口的模型名，要和厂商文档一致",
+    "api_key_env  密钥从哪个环境变量读",
+    "enabled   先设 false 可以在切换列表里隐藏掉",
+    "note      给人看的说明，会显示在界面上"
+  ],
+  "active": "deepseek-flash",
+  "profiles": [
+    {
+      "id": "deepseek-flash",
+      "label": "DeepSeek Flash",
+      "note": "快、便宜。日常客服推荐 —— 实测单次 1.6~2.8 秒，业务测试 18/18、多轮对话 3/3",
+      "base_url": "https://api.deepseek.com/v1",
+      "model": "deepseek-flash",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "enabled": true,
+      "temperature": 0.3,
+      "max_tokens": 2500
+    },
+    {
+      "id": "deepseek-pro",
+      "label": "DeepSeek V4 Pro",
+      "note": "思考模型，推理更深但慢 —— 实测单次 3~15 秒。复杂争议、难判断的场景可以用",
+      "base_url": "https://api.deepseek.com/v1",
+      "model": "deepseek-v4-pro",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "enabled": true,
+      "temperature": 0.3,
+      "max_tokens": 2500
+    },
+    {
+      "id": "qwen-plus",
+      "label": "通义千问 Plus（阿里云百炼）",
+      "note": "国内访问稳定。需要百炼的 API Key，注意密钥地域要和接口地址匹配（北京/新加坡不一样）",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "model": "qwen-plus",
+      "api_key_env": "DASHSCOPE_API_KEY",
+      "enabled": true,
+      "temperature": 0.3,
+      "max_tokens": 2000
+    },
+    {
+      "id": "qwen-max",
+      "label": "通义千问 Max（阿里云百炼）",
+      "note": "千问里最强的，比 plus 贵",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "model": "qwen-max",
+      "api_key_env": "DASHSCOPE_API_KEY",
+      "enabled": true,
+      "temperature": 0.3,
+      "max_tokens": 2000
+    },
+    {
+      "id": "custom",
+      "label": "自建网关 / 其它 OpenAI 兼容服务",
+      "note": "公司内网网关、vLLM、Ollama、One-API 之类都能接。填好 base_url 和 model 即可",
+      "base_url": "",
+      "model": "",
+      "api_key_env": "CUSTOM_API_KEY",
+      "enabled": true,
+      "temperature": 0.3,
+      "max_tokens": 2500
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+# --- 核心服务 ---
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+pydantic>=2.7,<3
+python-dotenv>=1.0,<2
+httpx>=0.27,<1
+openai>=1.60,<3
+
+# --- 企业微信回调加解密（官方通道） ---
+cryptography>=42
+
+# --- macOS 截屏+OCR 通道（读微信界面、模拟鼠标键盘） ---
+# 只在 WECHAT_CHANNEL=macos_wechat 时需要
+pyobjc-framework-Cocoa>=10
+pyobjc-framework-Quartz>=10
+pyobjc-framework-ApplicationServices>=10
+pyobjc-framework-Vision>=10
+Pillow>=10
+
+# --- 可选：Windows PC 微信 Hook（实验性，见 README 风险说明） ---
+# wcferry>=39.3.3
+# pywinauto>=0.6.8        # 只用于 bridge/inspect_wechat.py 控件探测

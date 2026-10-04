@@ -1,0 +1,102 @@
+{
+  "_说明": [
+    "在这里登记网点的『别的软件』，AI 就多了对应的调用能力。",
+    "默认只开了一个演示用的本机脚本（tools/demo_erp.py），用来验证链路。",
+    "接你自己的系统时照抄结构改字段即可，不用动代码。",
+    "",
+    "kind=http    REST 接口（申通开放平台、快递100、网点 ERP 的 HTTP 接口）",
+    "kind=command 本机命令（Excel 脚本、批处理、小工具 exe）",
+    "",
+    "risk=read   只读查询，AI 可以自由调用，结果直接进它的上下文",
+    "risk=write  有真实副作用（拦截/改址/催派），**AI 调不动**，只会登记成待办转人工",
+    "",
+    "密钥一律写环境变量名（env 字段），不要把密钥写在这个文件里。"
+  ],
+  "systems": [
+    {
+      "id": "demo_erp",
+      "label": "网点内部系统（演示）",
+      "kind": "command",
+      "enabled": true,
+      "description": "查运单的归属网点、业务员、重量、代收货款、客户备注",
+      "commands": [
+        {
+          "name": "query_waybill",
+          "label": "查运单详情",
+          "risk": "read",
+          "when": "需要知道这票归哪个网点、哪个业务员负责、多重、有没有代收货款、客户有什么备注要求时用",
+          "argv": ["{python}", "tools/demo_erp.py", "--waybill", "{waybill_no}"],
+          "timeout": 15
+        }
+      ]
+    },
+
+    {
+      "_comment": "下面两个是接真实系统时的样子，先关着；要用就把 enabled 改成 true 并填好",
+      "id": "sto_open",
+      "label": "申通开放平台",
+      "kind": "http",
+      "enabled": false,
+      "description": "申通官方接口：运单轨迹、拦截退回、改址",
+      "base_url": "https://open.sto.cn",
+      "auth": {
+        "type": "header",
+        "header": "Authorization",
+        "env": "STO_TOKEN",
+        "prefix": "Bearer "
+      },
+      "actions": [
+        {
+          "name": "track",
+          "label": "查运单轨迹",
+          "risk": "read",
+          "when": "需要申通官方的实时轨迹时用（比第三方查件更准）",
+          "method": "GET",
+          "path": "/openapi/track",
+          "params": { "waybillNo": "{waybill_no}" },
+          "reply_template": "运单 {waybill_no} 轨迹：{data}",
+          "timeout": 12
+        },
+        {
+          "name": "intercept_return",
+          "label": "拦截退回",
+          "risk": "write",
+          "when": "商家要求退回/拦截时用（本系统不代执行，转人工）",
+          "method": "POST",
+          "path": "/openapi/intercept",
+          "params": { "waybillNo": "{waybill_no}" }
+        },
+        {
+          "name": "change_address",
+          "label": "改址",
+          "risk": "write",
+          "when": "商家要求改收货地址时用（本系统不代执行，转人工）",
+          "method": "POST",
+          "path": "/openapi/changeAddress",
+          "params": { "waybillNo": "{waybill_no}" }
+        }
+      ]
+    },
+
+    {
+      "id": "kd100",
+      "label": "快递100",
+      "kind": "http",
+      "enabled": false,
+      "description": "第三方查件，覆盖多家快递",
+      "base_url": "https://poll.kuaidi100.com",
+      "auth": { "type": "none" },
+      "actions": [
+        {
+          "name": "query",
+          "label": "查件",
+          "risk": "read",
+          "when": "申通之外的快递需要查件时用",
+          "method": "GET",
+          "path": "/poll/query.do",
+          "params": { "num": "{waybill_no}", "customer": "{env:KD100_CUSTOMER}" }
+        }
+      ]
+    }
+  ]
+}

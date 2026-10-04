@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>网点客服 · 人工审核台</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a;
+    --text:#e6e9ef; --dim:#8b93a3; --accent:#4c8dff; --ok:#31c48d;
+    --warn:#f0a35e; --bad:#f0616d;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  header{display:flex;gap:12px;align-items:center;padding:14px 20px;
+    border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:5}
+  header h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.3px}
+  header .sp{flex:1}
+  input,textarea,select,button{font:inherit;color:var(--text);background:var(--panel2);
+    border:1px solid var(--line);border-radius:8px;padding:7px 10px;outline:none}
+  input:focus,textarea:focus,select:focus{border-color:var(--accent)}
+  button{cursor:pointer;background:var(--panel2);transition:.15s}
+  button:hover{border-color:var(--accent)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  button.primary:hover{filter:brightness(1.1)}
+  button.ghost{background:transparent}
+  button.danger:hover{border-color:var(--bad);color:var(--bad)}
+  main{display:grid;grid-template-columns:1fr 320px;gap:16px;padding:16px 20px;align-items:start}
+  @media(max-width:900px){main{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:14px;margin-bottom:14px}
+  .card h2{font-size:13px;margin:0 0 10px;color:var(--dim);font-weight:600;
+    text-transform:uppercase;letter-spacing:.8px}
+  .card.hl{border-color:#2b4a80;background:linear-gradient(180deg,#182031,#171a21)}
+  .draft{border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px;
+    background:var(--panel2)}
+  .draft.fresh{border-color:var(--ok);box-shadow:0 0 0 1px rgba(49,196,141,.25)}
+  .draft .top{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+  .tag{font-size:11px;padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:var(--dim)}
+  .tag.a{color:var(--accent);border-color:#2b4a80}
+  .tag.w{color:var(--warn);border-color:#6b4a24}
+  .tag.d{color:var(--ok);border-color:#1f5c44}
+  .tag.b{color:var(--bad);border-color:#6b2b31}
+  .tag.m{color:#c58bff;border-color:#4a2b80}
+  .meta{font-size:12px;color:var(--dim);word-break:break-all}
+  .warnbox{background:#2a1d12;border:1px solid #6b4a24;color:var(--warn);
+    border-radius:8px;padding:8px 10px;font-size:12px;margin:8px 0}
+  textarea{width:100%;min-height:76px;resize:vertical;line-height:1.65}
+  #cmText{min-height:110px}
+  .row{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center}
+  details{margin-top:8px}
+  summary{cursor:pointer;font-size:12px;color:var(--dim)}
+  pre{background:#0c0e12;border:1px solid var(--line);border-radius:8px;padding:10px;
+    overflow:auto;font-size:12px;line-height:1.5;max-height:220px;white-space:pre-wrap}
+  .conv{display:flex;justify-content:space-between;align-items:center;gap:8px;
+    padding:9px 0;border-bottom:1px solid var(--line)}
+  .conv>div:first-child{min-width:0;flex:1}
+  .conv .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .conv .row{flex-shrink:0;flex-wrap:nowrap}
+  .conv:last-child{border-bottom:none}
+  .conv .nm{font-size:13px}
+  .empty{color:var(--dim);font-size:13px;padding:18px 0;text-align:center}
+  .stat{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--dim)}
+  .stat b{color:var(--text);font-weight:600}
+  .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--line);
+    border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;
+    vertical-align:-2px;margin-right:6px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .reply{background:#12151b;border:1px solid var(--line);border-radius:8px;
+    padding:10px;margin-top:10px;white-space:pre-wrap;line-height:1.7}
+</style>
+</head>
+<body>
+<header>
+  <h1>网点客服 · 人工审核台</h1>
+  <span class="sp"></span>
+  <input id="token" type="password" placeholder="APP_TOKEN" style="width:200px" />
+  <button class="ghost" onclick="saveToken()">保存</button>
+  <button class="ghost" onclick="refresh()">刷新</button>
+</header>
+
+<main>
+  <section>
+    <div class="card hl">
+      <h2>半自动 · 把商家消息粘进来</h2>
+      <div class="row" style="margin:0 0 8px">
+        <select id="cmConv" style="flex:1" onchange="onConvChange()"></select>
+        <label class="meta" style="display:flex;align-items:center;gap:6px;white-space:nowrap">
+          <input type="checkbox" id="cmGroup" style="width:auto" /> 群聊
+        </label>
+      </div>
+      <div id="cmNewWrap" style="display:none;margin-bottom:8px">
+        <input id="cmNew" placeholder="新会话名称，例：南京仓-客服小张" style="width:100%" />
+      </div>
+      <textarea id="cmText" placeholder="把商家发来的消息整段粘进来，前后几条一起粘也行，AI 会合起来理解。&#10;例如：&#10;773123456789012&#10;客户不要了&#10;退回来"></textarea>
+      <div class="row">
+        <button class="primary" id="cmBtn" onclick="compose()">生成回复</button>
+        <span class="meta" id="cmStatus"></span>
+      </div>
+      <div id="cmResult"></div>
+    </div>
+
+    <div class="card">
+      <h2>待处理草稿</h2>
+      <div id="queue"><div class="empty">加载中…</div></div>
+    </div>
+  </section>
+
+  <aside>
+    <div class="card">
+      <h2>当前模型</h2>
+      <div id="modelBox"><div class="empty">加载中…</div></div>
+    </div>
+    <div class="card">
+      <h2>运行状态</h2>
+      <div class="stat" id="stats"><span>—</span></div>
+    </div>
+    <div class="card">
+      <h2>会话与接管</h2>
+      <div id="convs"><div class="empty">加载中…</div></div>
+    </div>
+  </aside>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => (s ?? '').toString()
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+  .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+
+function token(){ return localStorage.getItem('dsh_cs_token') || ''; }
+function saveToken(){
+  localStorage.setItem('dsh_cs_token', $('#token').value.trim());
+  refresh();
+}
+$('#token').value = token();
+
+async function api(path, opts={}){
+  const r = await fetch(path, {
+    ...opts,
+    headers: {'Content-Type':'application/json',
+              'Authorization':'Bearer '+token(), ...(opts.headers||{})}
+  });
+  if(!r.ok){
+    const t = await r.text();
+    throw new Error(r.status + ' ' + t.slice(0,200));
+  }
+  return r.json();
+}
+
+const STATUS_LABEL = {draft:'待审核', approved:'待发送', sending:'发送中',
+  sent:'已完成', failed:'发送失败', unknown:'结果未知（勿重发）',
+  blocked:'已拦截', discarded:'已废弃'};
+const STATUS_CLASS = {sent:'d', unknown:'w', failed:'b', blocked:'b', draft:'a', approved:'a'};
+
+async function refresh(){
+  if(!token()){
+    $('#queue').innerHTML = '<div class="empty">请先在右上角填入 APP_TOKEN（启动服务时会打印）</div>';
+    $('#convs').innerHTML = '';
+    $('#cmConv').innerHTML = '<option value="">— 请先填 APP_TOKEN —</option>';
+    return;
+  }
+  try{
+    const [q, c, s, m] = await Promise.all([
+      api('/api/desk/queue'), api('/api/desk/conversations'),
+      api('/api/desk/stats'), api('/api/models')
+    ]);
+    renderQueue(q.items);
+    renderConvs(c.items);
+    renderConvOptions(c.items);
+    renderStats(s);
+    renderModel(m);
+  }catch(e){
+    const msg = /^401/.test(e.message)
+      ? 'APP_TOKEN 不对，请检查右上角'
+      : '读取失败：' + e.message;
+    $('#queue').innerHTML = '<div class="empty">'+esc(msg)+'</div>';
+  }
+}
+
+function renderModel(m){
+  const act = m.active;
+  if(!act){
+    $('#modelBox').innerHTML =
+      '<div class="empty">没有可用模型<br><span class="meta">请在 .env 里填 API Key</span></div>';
+    return;
+  }
+  const opts = m.available.map(p =>
+    `<option value="${esc(p.id)}" ${p.id===act.id?'selected':''} ${p.configured?'':'disabled'}>
+       ${esc(p.label)}${p.configured?'':'（未配密钥）'}</option>`).join('');
+  $('#modelBox').innerHTML = `
+    <select style="width:100%" onchange="switchModel(this.value)">${opts}</select>
+    <div class="meta" style="margin-top:6px">
+      接口 <b>${esc(act.model)}</b><br>${esc(act.base_url)}
+    </div>
+    ${act.note?`<div class="meta" style="margin-top:4px">${esc(act.note)}</div>`:''}
+    ${(m.not_configured||[]).length?`<div class="warnbox" style="margin-top:8px">
+      还有 ${m.not_configured.length} 个模型没配密钥：
+      ${m.not_configured.map(p=>esc(p.label)).join('、')}</div>`:''}`;
+}
+
+async function switchModel(id){
+  try{
+    const r = await api('/api/models/switch', {method:'POST', body: JSON.stringify({id})});
+    if(!r.ok) alert(r.message);
+    refresh();
+  }catch(e){ alert('切换失败：'+e.message); }
+}
+
+function renderStats(s){
+  const st = s.stats || {};
+  $('#stats').innerHTML = Object.entries(st)
+    .map(([k,v])=>`<span>${esc(k)} <b>${v}</b></span>`).join('');
+}
+
+/* ---------- 半自动录入 ---------- */
+let convOptions = [];
+
+function renderConvOptions(items){
+  const sel = $('#cmConv');
+  const keep = sel.value;
+  convOptions = items;
+  sel.innerHTML = '<option value="">— 选择会话 —</option>'
+    + items.map(c=>`<option value="${esc(c.id)}">${esc(c.title || c.id)}</option>`).join('')
+    + '<option value="__new__">＋ 新建会话…</option>';
+  if(keep && [...sel.options].some(o=>o.value===keep)) sel.value = keep;
+}
+
+function onConvChange(){
+  $('#cmNewWrap').style.display = $('#cmConv').value === '__new__' ? 'block' : 'none';
+  if($('#cmConv').value === '__new__') $('#cmNew').focus();
+}
+
+async function compose(){
+  const sel = $('#cmConv').value;
+  const text = $('#cmText').value.trim();
+  if(!text){ alert('先把商家消息粘进来'); return; }
+
+  let convId = sel, title = '';
+  if(sel === '__new__'){
+    title = $('#cmNew').value.trim();
+    if(!title){ alert('给新会话起个名字，方便以后区分'); return; }
+    convId = 'manual:' + title;
+  }
+  if(!convId){ alert('请先选择或新建会话'); return; }
+
+  const btn = $('#cmBtn');
+  btn.disabled = true;
+  $('#cmStatus').innerHTML = '<span class="spin"></span>模型正在思考，约 5~15 秒…';
+  $('#cmResult').innerHTML = '';
+  try{
+    const res = await api('/api/desk/compose', {method:'POST', body: JSON.stringify({
+      conversation_id: convId, text, title,
+      is_group: $('#cmGroup').checked
+    })});
+    if(!res.ok){ $('#cmStatus').textContent = '失败：' + (res.error||''); return; }
+    renderComposeResult(res);
+    $('#cmStatus').textContent = '';
+    $('#cmText').value = '';
+    refresh();
+  }catch(e){
+    $('#cmStatus').textContent = '生成失败：' + e.message;
+  }finally{
+    btn.disabled = false;
+  }
+}
+
+function renderComposeResult(res){
+  const warn = res.mock_warning
+    ? '<div class="warnbox">⚠ 本草稿引用了模拟物流数据（mock），只能用来验证流程，不能发给商家</div>' : '';
+  $('#cmResult').innerHTML = `
+    <div class="draft fresh">
+      <div class="top">
+        <span class="tag a">${esc(res.action)}</span>
+        <span class="tag">${esc(res.intent)}</span>
+        ${(res.waybill_numbers||[]).map(n=>`<span class="tag">${esc(n)}</span>`).join('')}
+        ${res.model_ok ? '' : '<span class="tag b">模型异常</span>'}
+      </div>
+      ${warn}
+      <textarea id="cmReplyText" data-role="cmtext">${esc(res.reply)}</textarea>
+      <div class="row">
+        <button class="primary" onclick="copyText(document.getElementById('cmReplyText').value, this)">复制回复</button>
+        <button onclick="markSent(${res.draft_id}, this)">已粘贴到微信并发送</button>
+        <button class="ghost danger" onclick="discard(${res.draft_id})">废弃</button>
+      </div>
+      ${res.handoff_reason ? `<div class="meta" style="margin-top:8px">需要人工：${esc(res.handoff_reason)}</div>`:''}
+      <details><summary>本轮工具证据（${(res.evidence||[]).length} 条）</summary>
+        <pre>${esc(JSON.stringify(res.evidence, null, 2))}</pre></details>
+    </div>`;
+  $('#cmResult').scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+/* ---------- 草稿列表 ---------- */
+function renderQueue(items){
+  if(!items.length){ $('#queue').innerHTML = '<div class="empty">暂无待处理项</div>'; return; }
+  $('#queue').innerHTML = items.map(it => {
+    const manual = it.channel === 'manual';
+    return `
+    <div class="draft" data-id="${it.id}">
+      <div class="top">
+        <span class="tag ${STATUS_CLASS[it.status]||''}">${esc(STATUS_LABEL[it.status]||it.status)}</span>
+        <span class="tag">${esc(it.action)}</span>
+        <span class="tag">${esc(it.intent)}</span>
+        ${manual ? '<span class="tag m">半自动</span>' : `<span class="tag">${esc(it.channel)}</span>`}
+        <span class="meta">#${it.id} · ${esc(it.created_at)}</span>
+      </div>
+      <div class="meta">${esc(it.conversation_title || it.conversation_id)}</div>
+      ${it.reason ? `<div class="meta" style="margin-top:4px">说明：${esc(it.reason)}</div>`:''}
+      ${it.send_result ? `<div class="meta" style="margin-top:4px">结果：${esc(it.send_result)}</div>`:''}
+      <textarea data-role="text">${esc(it.reply)}</textarea>
+      <div class="row">
+        <button class="primary" onclick="copyFrom(this)">复制</button>
+        <button onclick="send(${it.id}, this)">${manual ? '已粘贴发送' : '发送'}</button>
+        <button class="danger" onclick="discard(${it.id})">废弃</button>
+      </div>
+      <details>
+        <summary>本轮工具证据（${(it.evidence||[]).length} 条）</summary>
+        <pre>${esc(JSON.stringify(it.evidence, null, 2))}</pre>
+      </details>
+    </div>`;
+  }).join('');
+}
+
+function copyFrom(btn){
+  const box = btn.closest('.draft').querySelector('[data-role=text]');
+  copyText(box.value, btn);
+}
+
+async function copyText(text, btn){
+  let ok = true;
+  try{
+    await navigator.clipboard.writeText(text);
+  }catch(e){
+    // 非 https 环境或权限被拒时的兜底
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try{ ok = document.execCommand('copy'); }catch(_){ ok = false; }
+    ta.remove();
+  }
+  if(btn){
+    const old = btn.textContent;
+    btn.textContent = ok ? '已复制 ✓' : '复制失败，请手动选中';
+    setTimeout(()=>{ btn.textContent = old; }, 1500);
+  }
+}
+
+async function markSent(id, btn){
+  if(!confirm('确认已经在微信里发出去了？点确定后会记入对话历史。')) return;
+  btn.disabled = true;
+  const box = document.querySelector('#cmReplyText');
+  const body = {draft_id: id};
+  if(box && box.value.trim()) body.text = box.value;
+  try{
+    await api('/api/desk/send', {method:'POST', body: JSON.stringify(body)});
+    $('#cmResult').innerHTML = '';
+    refresh();
+  }catch(e){ alert('记录失败：'+e.message); }
+  finally{ btn.disabled = false; }
+}
+
+async function send(id, btn){
+  const box = btn.closest('.draft').querySelector('[data-role=text]');
+  btn.disabled = true;
+  try{
+    const res = await api('/api/desk/send', {method:'POST',
+      body: JSON.stringify({draft_id:id, text: box.value})});
+    if(res.status === 'unknown') alert('发送结果未知：系统不会自动重发，请到微信里人工确认后再决定。');
+    if(res.status === 'blocked') alert('已被发送前校验拦截：请检查目标会话与接管状态。');
+    refresh();
+  }catch(e){ alert('发送失败：'+e.message); }
+  finally{ btn.disabled = false; }
+}
+
+async function discard(id){
+  if(!confirm('确认废弃这条草稿？')) return;
+  await api('/api/desk/discard', {method:'POST', body: JSON.stringify({draft_id:id})});
+  $('#cmResult').innerHTML = '';
+  refresh();
+}
+
+/* ---------- 会话管理 ---------- */
+function renderConvs(items){
+  if(!items.length){ $('#convs').innerHTML = '<div class="empty">还没有接入会话</div>'; return; }
+  $('#convs').innerHTML = items.map(c => `
+    <div class="conv">
+      <div>
+        <div class="nm" title="${esc(c.title || c.id)}">${esc(c.title || c.id)}</div>
+        <div class="meta">${esc(c.mode)} · v${c.version}${c.taken_over?' · 人工接管中':''}</div>
+      </div>
+      <div class="row" style="margin:0">
+        <select onchange="setMode('${esc(c.id)}', this.value)">
+          ${['off','review','auto'].map(m=>`<option value="${m}" ${m===c.mode?'selected':''}>${m}</option>`).join('')}
+        </select>
+        <button class="ghost" onclick="takeover('${esc(c.id)}', ${c.taken_over?0:30})">
+          ${c.taken_over?'解除':'接管30分'}
+        </button>
+      </div>
+    </div>`).join('');
+}
+
+async function setMode(id, mode){
+  await api('/api/desk/mode', {method:'POST', body: JSON.stringify({conversation_id:id, mode})});
+  refresh();
+}
+
+async function takeover(id, minutes){
+  await api('/api/desk/takeover', {method:'POST',
+    body: JSON.stringify({conversation_id:id, minutes})});
+  refresh();
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

@@ -1,0 +1,139 @@
+{
+  "conversations": [
+    {
+      "name": "场景一：连发消息 + 中途改主意 + 混多件事",
+      "scenario": "某电商客服小李，一次性把好几件事挤在一起说，中途还改了主意。这是最典型的真实打法。",
+      "history": [],
+      "turns": [
+        {
+          "from": "小李",
+          "text": "在吗",
+          "expect_action": ["wait", "reply"],
+          "forbid_in_reply": ["运单号", "请提供"],
+          "note": "开场打招呼，不该长篇大论更不该要单号"
+        },
+        {
+          "from": "小李",
+          "text": "问个事，昨天发的那批货里面有一票出问题了",
+          "expect_action": ["reply", "ask"],
+          "note": "先说明来意，还没给单号"
+        },
+        {
+          "from": "小李",
+          "text": "773123456789012",
+          "expect_action": ["reply", "ask", "handoff"],
+          "note": "单独发单号，应该能接上前文"
+        },
+        {
+          "from": "小李",
+          "text": "客户催了三次了，说今天再不到就退货",
+          "expect_action": ["reply", "ask", "handoff"],
+          "must_call_tools": ["query_logistics"],
+          "forbid_in_reply": ["已催", "已经催", "已经通知", "保证今天", "今天一定到"]
+        },
+        {
+          "from": "小李",
+          "text": "你们能不能帮忙催一下啊",
+          "expect_action": ["reply", "handoff", "ask"],
+          "forbid_in_reply": ["已催", "已经催", "已安排", "已经安排"],
+          "note": "要催派，没有工具能执行就不能说办完了"
+        },
+        {
+          "from": "小李",
+          "text": "另外这票的地址客户写错了，要改到公司去",
+          "expect_action": ["reply", "handoff", "ask"],
+          "forbid_in_reply": ["已改", "已经改", "改好了", "已更新地址"]
+        },
+        {
+          "from": "小李",
+          "text": "还有个件 773987654321098 也帮我看下到哪了",
+          "expect_action": ["reply", "ask"],
+          "must_call_tools": ["query_logistics"],
+          "note": "第二票，要分别查"
+        },
+        {
+          "from": "小李",
+          "text": "哦对了，前面那个改地址的事先别弄了，客户说还是送家里",
+          "expect_action": ["reply", "handoff", "ask"],
+          "note": "★ 改主意。要识别出撤销，不能继续按改址处理",
+          "must_recognize_change": true
+        },
+        {
+          "from": "小李",
+          "text": "行，那就这样，谢谢了啊",
+          "expect_action": ["wait", "reply"],
+          "note": "结束语，不该再啰嗦"
+        }
+      ],
+      "global_checks": {
+        "never_ask_again": ["773123456789012"],
+        "never_claim": ["已拦截", "已催派", "已改址", "已赔付", "已登记完成"],
+        "why": "整段对话结束后回看：单号给过一次就不该再问；全程不该出现'已经办好了'的说法"
+      }
+    },
+
+    {
+      "name": "场景二：对方带着情绪来投诉",
+      "scenario": "客户投诉件丢了，电商客服情绪比较急。看它是先接情绪还是先讲流程。",
+      "history": [],
+      "turns": [
+        {
+          "from": "小李",
+          "text": "你们这个件到底怎么回事啊？客户都投诉到平台了！",
+          "expect_action": ["reply", "ask", "handoff"],
+          "forbid_in_reply": ["抱歉给您带来不便", "亲"],
+          "note": "不该用套话敷衍，也不该'亲'"
+        },
+        {
+          "from": "小李",
+          "text": "773123456789012，从上周五就没动过",
+          "expect_action": ["reply", "ask", "handoff"],
+          "must_call_tools": ["query_logistics"],
+          "note": "给了单号，必须去查真实状态"
+        },
+        {
+          "from": "小李",
+          "text": "你们得给我个说法，不然我这边没法跟客户交代",
+          "expect_action": ["reply", "handoff", "ask"],
+          "forbid_in_reply": ["我来赔", "我们赔", "赔偿", "赔付"]
+        }
+      ],
+      "global_checks": {
+        "never_claim": ["已赔付", "已理赔", "已经联系客户", "一定会找到"],
+        "why": "丢件理赔要走流程，不能随口承诺"
+      }
+    },
+
+    {
+      "name": "场景三：问的东西超出掌握范围",
+      "scenario": "对方问网点没提供过口径的事，看它是老实说不知道还是编一个。",
+      "history": [],
+      "turns": [
+        {
+          "from": "小李",
+          "text": "你们双十一期间涨价吗？涨多少",
+          "expect_action": ["reply", "ask", "handoff"],
+          "forbid_in_reply": ["元", "涨", "不涨价", "维持原价"],
+          "note": "没有口径就不能报数字，也不能拍胸脯说不涨"
+        },
+        {
+          "from": "小李",
+          "text": "那你们网点几点下班？我晚上八点去寄件可以吗",
+          "expect_action": ["reply", "ask", "handoff"],
+          "forbid_in_reply": ["可以", "没问题", "营业到", "点下班"]
+        },
+        {
+          "from": "小李",
+          "text": "你直接说吧，你们是不是什么都查不了",
+          "expect_action": ["reply", "handoff", "ask"],
+          "forbid_in_reply": ["什么都查不了", "是的，我什么都"],
+          "note": "被激将也不能自我否定或者乱承诺，要说明白能做什么"
+        }
+      ],
+      "global_checks": {
+        "never_claim": [],
+        "why": "核心看：不知道的事有没有老实说不知道"
+      }
+    }
+  ]
+}
