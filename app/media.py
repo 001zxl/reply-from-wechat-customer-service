@@ -53,27 +53,86 @@ MEDIA_DIR = ROOT / "data" / "media"
 CACHE_FILE = ROOT / "data" / "media_cache.json"
 CACHE_LIMIT = 500                    # 缓存条目上限，超了丢最旧的
 
+# 额度用完（finish_reason=length）时的降级提示词。
+# 实测：详细提示词要 7667 token（思考 10665 字），给 6000 必爆。
+# 降级到这句只需要 3700 左右，先拿到内容再说，总比空着强。
+FALLBACK_PROMPT = (
+    "这是快递网点客服收到的图片。简要回答："
+    "1) 这是什么？2) 运单号是多少？3) 物流状态？"
+    "4) 收寄件人和地址？看不清就说看不清，不要猜。"
+)
+
 # 给视觉模型的提问。要点：
 #   · 明确它的角色（快递网点客服助手），不要说成通用图片描述
 #   · 强制它区分"业务信息"和"无关内容"
 #   · 强制它对看不清的部分诚实
 #   · 禁止它猜商家意图（那是下一步客服模型的事，要基于完整上下文）
-VISION_PROMPT = """你是快递网点的客服助手。商家发来一张{kind_cn}，请如实描述。
+VISION_PROMPT = """你是快递网点的客服助手。商家发来一张{kind_cn}。
 
-请回答三件事：
-1. **这是什么**：拍的是什么、截的是什么页面。一句话。
-2. **和快递业务有关的信息**：把能看清的都列出来 ——
-   运单号（通常是 12~15 位数字，或字母+数字）、收寄件人、电话、地址、
-   货物名称、重量、代收货款、日期、网点名、状态文字。
-   如果是聊天截图或订单页截图，把其中的关键文字也列出来。
-3. **看不清的部分**：明确说哪些地方看不清、无法确认。
+# 铁律：只描述你**真实看到**的字，一个字都不许补
 
-要求：
-- 只描述你**真实看到**的。看不清就说看不清，**绝对不要猜**。
-- 不要把图片里的印刷文字（型号、规格、电压、制造商地址这类）当成
-  客户信息。如果图里的地址是厂商地址而不是收件地址，要说明。
-- **不要推测商家想让你做什么**，只描述图片内容。
-- 用中文，简洁，不要客套话。
+真实事故（必须避免）：面单上有个分拣码写着「3-LR-九龙 6-F4」，
+寄件地址写的是「山东省潍坊市坊子区北海路…」。
+模型把分拣码里的「九龙」抠出来，跟地址里的「坊子区」拼在一起，
+输出成「山东省潍坊市坊子区**九龙街道**」——
+**这个地址面单上根本不存在，是编出来的**，而且看起来完全合理，
+不逐字核对根本发现不了。
+
+所以：
+- **不许补全**。看到「九龙」就写「九龙」，不许写成「九龙街道」「九龙镇」。
+- **不许展开缩写**。看到「潍」就写「潍」，不许写成「潍坊」。
+- **不许把不同区域的文字拼在一起**。分拣码归分拣码，地址归地址。
+- **不许用常识填空**。不知道某个区属哪个市，就不要补。
+- 某个字段看不到，就写「未见」，**不许猜、不许留个像样的值**。
+- 数字（运单号、电话、金额、重量）**逐个字符抄**，抄不全就写
+  「只看到前 N 位：xxx」，不许给出一个"补全后"的号码。
+- **不要把"印刷在商品/设备上的文字"当成客户信息**。面单照片里常常还有
+  商品标签、设备铭牌，上面的型号、规格、电压、**制造商地址**都不是寄收件信息。
+  举例：标签写着「制造商：佳能公司，日本国东京都大田区…」——
+  那是**厂商地址**，不是收件地址，要明确说明。
+- **不要推测商家想让你做什么**。你只负责把图里的内容如实读出来，
+  商家要办什么事由后面结合聊天上下文判断。
+
+# 快递面单的结构（认位置，别认错区）
+
+1. **顶部**：快递公司 logo 和名称、运单号条形码、运单号明文
+2. **寄件信息区**：标着「寄」字 → 寄件人姓名、电话、详细地址
+3. **收件信息区**：标着「收」字 → 收件人姓名、电话、详细地址
+4. **物流信息区**：运单号、产品类型、重量、代收货款、件数
+5. **分拣码区（最容易认错的地方）**：形如 `3-LR-九龙 6-F4` 或 `630H092-3070`
+   - 这是**内部路由编码**，三段/四段分别代表：
+     分拨中心 / 网点或分部 / 派送段或业务员码
+   - **里面的地名是"哪个网点负责"，不是收件人所在地，不是地址的一部分**
+   - 这类码要单独归到「分拣路由信息」，**绝对不能写进收件地址**
+6. **底部**：备注、签收栏、广告
+
+不同快递公司版面略有差异，但「寄/收」两个大字和运单号条码一定在最显眼的位置。
+
+# 隐私面单（现在很常见，别当成"看不清"）
+
+- 收件人姓名可能只留姓：`徐*` 或 `徐**` → 要如实写出**徐**，不要只说"被遮挡"
+- 收件人电话显示为手机号后四位：`*******7428` → 这是**尾号**，不是完整号码
+- 寄件人电话可能是**虚拟号**：`18413225798转7117` → 要标明这是虚拟号
+
+# 输出格式
+
+**1. 这是什么**：一句话说清是面单照片、物流轨迹截图、聊天截图还是别的。
+
+**2. 逐字抄录**：把你能看清的文字，按它**在图上出现的位置**分组抄下来。
+每组先用一句话说明它在面单的哪个区（如「寄件信息区」「分拣码区」）。
+看不清的字用 `?` 代替，例如 `山东省潍坊市坊子区北海??`。
+
+**3. 归纳字段**（只在上面抄录确实包含时才写，没有就写「未见」）：
+   - 运单号 / 快递公司
+   - 寄件人：姓名 / 电话 / 地址
+   - 收件人：姓名 / 电话 / 地址
+   - 货物：名称 / 重量 / 件数 / 代收货款
+   - 分拣路由信息（单独列，不要混进地址）
+   - 时间、状态
+
+**4. 看不清的部分**：明确列出哪些字看不清。
+
+用中文，不要客套话。**宁可写「未见」，也不要给一个看起来对的答案。**
 """
 
 
@@ -180,11 +239,26 @@ async def describe_media(screenshot: str | Path,
     try:
         from openai import AsyncOpenAI
 
+        # 思考模型的额度要给足：实测详细提问需要 7667 token
+        budget = max(prof.max_tokens, 3000)
         client = AsyncOpenAI(api_key=prof.api_key, base_url=prof.base_url,
-                             timeout=90.0, max_retries=1)
+                             timeout=300.0, max_retries=1)
         b64 = base64.b64encode(data).decode()
+
+        # ★ 看图抄字必须关掉思考。
+        # 实测同一张面单：思考开启 47 秒 / 11808 token（还容易把额度耗光、
+        # 返回空字符串）；关掉后 5 秒 / 1042 token，而且**准确度更高** ——
+        # 文字抄录不需要推理，思考反而让模型"脑补"：它曾把分拣码里的
+        # 「九龙」跟地址里的「坊子区」拼成「九龙街道」，面单上根本没这个地址。
+        extra: dict = {}
+        if prof.thinking == "disabled":
+            extra["thinking"] = {"type": "disabled"}
+        elif prof.thinking == "enabled":
+            extra["thinking"] = {"type": "enabled"}
+
         resp = await client.chat.completions.create(
             model=prof.model,
+            extra_body=extra or None,
             messages=[{
                 "role": "user",
                 "content": [
@@ -193,22 +267,51 @@ async def describe_media(screenshot: str | Path,
                      "image_url": {"url": f"data:image/png;base64,{b64}"}},
                 ],
             }],
+            # 注意：思考模式下 temperature 不生效（API 会忽略）
             temperature=prof.temperature,
-            # ★ 思考模型：给少了会被思考过程吃光，返回空且不报错
-            max_tokens=max(prof.max_tokens, 2500),
+            max_tokens=budget,
         )
         choice = resp.choices[0]
         raw = (choice.message.content or "").strip()
         usage = getattr(resp, "usage", None)
 
+        # 额度被思考吃光时，用简短提示词再试一次 —— 总比返回空强
+        if not raw and getattr(choice, "finish_reason", "") == "length":
+            log.warning("视觉模型额度用尽（model=%s, max_tokens=%s），改用简短提示词重试",
+                        prof.model, budget)
+            try:
+                resp = await client.chat.completions.create(
+                    model=prof.model,
+                    extra_body=extra or None,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": FALLBACK_PROMPT},
+                            {"type": "image_url",
+                             "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                        ],
+                    }],
+                    temperature=prof.temperature,
+                    max_tokens=budget,
+                )
+                choice = resp.choices[0]
+                raw = (choice.message.content or "").strip()
+                usage = getattr(resp, "usage", None)
+                if raw:
+                    log.info("降级重试成功（%d 字）", len(raw))
+            except Exception:
+                log.exception("降级重试也失败")
+
         if not raw:
             reason = getattr(choice, "finish_reason", "?")
-            log.warning("视觉模型返回空（finish_reason=%s，model=%s）", reason, prof.model)
+            log.warning("视觉模型返回空（finish_reason=%s，model=%s，max_tokens=%s）",
+                        reason, prof.model, budget)
             return MediaResult(
                 ok=False, crop_path=str(path),
                 error=f"视觉模型返回了空内容（finish_reason={reason}）。"
-                      f"多半是 max_tokens 不够，被思考过程吃光了，"
-                      f"把 config/models.json 里 {prof.id} 的 max_tokens 调大。",
+                      f"多半是 max_tokens 不够，被思考过程吃光了。"
+                      f"现在 config/models.json 里 {prof.id} 的 max_tokens 是 {budget}，"
+                      f"可以再调大些。",
             )
 
         text = _to_message_text(raw, kind)

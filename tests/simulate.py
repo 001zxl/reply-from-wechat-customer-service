@@ -469,6 +469,43 @@ async def main() -> int:
     check("S19 配置模板里有 WECHAT_SCROLL_TO_BOTTOM",
           "WECHAT_SCROLL_TO_BOTTOM=" in _envtxt)
 
+    # ---------------- S20 看图抄字：反编造 + 关思考 ----------------
+    # 真实事故：面单上分拣码写着「3-LR-九龙 6-F4」，寄件地址写的是
+    # 「山东省潍坊市坊子区北海路」。模型把分拣码里的「九龙」抠出来，
+    # 跟地址里的「坊子区」拼成「山东省潍坊市坊子区九龙街道」——
+    # **面单上根本没这个地址**，而且看起来完全合理，不逐字核对发现不了。
+    from app.media import VISION_PROMPT as _VP
+    from app import models as _models
+
+    check("S20 提示词点名了这次编造事故（九龙街道）", "九龙街道" in _VP)
+    check("S20 提示词禁止补全", "不许补全" in _VP)
+    check("S20 提示词要求逐字抄录", "逐字抄录" in _VP or "逐字" in _VP)
+    check("S20 提示词说明分拣码不是地址",
+          "分拣码" in _VP and "内部路由编码" in _VP)
+    check("S20 提示词要求分拣码单独归类", "单独列" in _VP or "单独归到" in _VP)
+    check("S20 提示词讲了隐私面单（只留姓/尾号/虚拟号）",
+          "虚拟号" in _VP and "尾号" in _VP)
+    check("S20 提示词要求读不到写「未见」", "未见" in _VP)
+    check("S20 提示词禁止把不同区域的字拼一起", "拼在一起" in _VP)
+
+    _v = _models.vision_profile()
+    check("S20 视觉档案存在", _v is not None)
+    if _v:
+        check("S20 看图必须关掉思考模式", _v.thinking == "disabled",
+              f"实际 {_v.thinking!r}")
+        check("S20 用官方模型名 deepseek-flash（旧实验名已下线）",
+              _v.model == "deepseek-flash", f"实际 {_v.model}")
+        check("S20 关思考后额度不需要给到 8000", _v.max_tokens <= 4000)
+
+    _t = _models.active_profile()
+    if _t:
+        check("S20 文本模型不能跟着关思考（推理有帮助）",
+              _t.thinking != "disabled", f"实际 {_t.thinking!r}")
+
+    _msrc = (_ROOT / "app" / "media.py").read_text(encoding="utf-8")
+    check("S20 media.py 真的把 thinking 参数传下去了",
+          'extra_body=extra' in _msrc and 'thinking' in _msrc)
+
     await pipeline.stop()
 
     # ---------------- S11 安全兜底：不依赖模型给的 intent ----------------

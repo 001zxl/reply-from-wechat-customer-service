@@ -50,6 +50,7 @@ class ModelProfile:
     enabled: bool = True
     temperature: float = 0.3
     max_tokens: int = 2500
+    thinking: str = ""            # enabled / disabled / 空(用服务端默认)
     api_key: str = ""
     problems: list[str] = field(default_factory=list)
 
@@ -120,6 +121,7 @@ def profiles(include_disabled: bool = False) -> list[ModelProfile]:
             enabled=bool(raw.get("enabled", True)),
             temperature=float(raw.get("temperature", 0.3)),
             max_tokens=int(raw.get("max_tokens", 2500)),
+            thinking=str(raw.get("thinking") or "").strip().lower(),
             api_key=key,
             problems=problems,
         ))
