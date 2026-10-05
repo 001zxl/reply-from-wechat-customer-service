@@ -375,14 +375,18 @@ def title_ok(actual: str, want: str) -> bool:
 
 # 超过这个高度（窗口内逻辑点数）就认为不是纯文字气泡
 MEDIA_MIN_HEIGHT = 70.0
-_MEDIA_COL_DENSE = 0.40     # 一列要有四成内容是内容，才算在图片宽度内
+_MEDIA_COL_DENSE = 0.25     # 一列要有四成内容是内容，才算在图片宽度内
 _MEDIA_ROW_DENSE = 0.55     # 一行的图片宽度里要有 55% 是内容
 # 纵向间隔小于这个值（逻辑点）的媒体区块要合并成一条
 MEDIA_MERGE_GAP = 60.0
 # 窗口左右两边这几个点里可能有边框/阴影，分析时要排除
 WINDOW_EDGE_INSET = 14.0
-# 判定"有内容"的像素差阈值
-_MEDIA_PIXEL_DIFF = 40
+# 判定"有内容"的像素差阈值。
+# ★ 必须给得小：微信聊天背景是 (250,250,250)，而截图类图片内容是纯白
+#   (255,255,255)，**只差 5**。给 40 会把图片本身当成背景。
+_MEDIA_PIXEL_DIFF = 10
+# 照片类检测用的粗阈值（照片有大片浅色区域）
+_MEDIA_COARSE_DIFF = 40
 # 行/列上算作"有内容"的占比下限
 _MEDIA_ROW_THRESHOLD = 0.05
 _MEDIA_COL_THRESHOLD = 0.25
@@ -428,22 +432,71 @@ def text_row_ranges(text_boxes: list[TextBox], layout: Layout,
     return [(a, b) for a, b in merged]
 
 
+def _content_mask(arr, bg, thr=_MEDIA_PIXEL_DIFF):
+    import numpy as np
+    return np.abs(arr - bg).sum(axis=2) > thr
+
+
+def _row_runs(mask, scale, min_height_pt=MEDIA_MIN_HEIGHT,
+              row_thr=_MEDIA_ROW_THRESHOLD):
+    """按行切出连续的"有内容"段落，只留够高的。"""
+    rowpct = mask.sum(axis=1) / max(1, mask.shape[1])
+    runs: list[tuple[int, int]] = []
+    start: Optional[int] = None
+    for y, p in enumerate(rowpct):
+        if p > row_thr and start is None:
+            start = y
+        elif p <= row_thr and start is not None:
+            runs.append((start, y))
+            start = None
+    if start is not None:
+        runs.append((start, len(rowpct)))
+    return [(a, b) for a, b in runs if (b - a) / scale >= min_height_pt]
+
+
+def _tighten_box(mask, y0, y1, px0, px_end, scale, min_height_pt):
+    """在 y 段内收紧左右，再拿这几列反过来收紧上下。返回像素框或 None。"""
+    import numpy as np
+    seg = mask[y0:y1]
+    if seg.size == 0:
+        return None
+    colpct = seg.sum(axis=0) / max(1, seg.shape[0])
+    nz = np.nonzero(colpct > _MEDIA_COL_DENSE)[0]
+    if len(nz) == 0:
+        return None
+    # 返回的是 crop 内坐标（x 和 y 都是），调用方再统一加偏移。
+    # ★ 这里踩过坑：x 曾经在这里加过 px0，调用方又加一遍，坐标就double了。
+    bx0, bx1 = int(nz[0]), int(nz[-1]) + 1
+    if (bx1 - bx0) / scale < 60:
+        return None
+    sub = seg[:, int(nz[0]):int(nz[-1]) + 1]
+    subrow = sub.sum(axis=1) / max(1, sub.shape[1])
+    rnz = np.nonzero(subrow > _MEDIA_ROW_DENSE)[0]
+    if len(rnz) == 0:
+        return None
+    by0, by1 = y0 + int(rnz[0]), y0 + int(rnz[-1]) + 1
+    if (by1 - by0) / scale < min_height_pt:
+        return None
+    return (bx0, by0, bx1, by1)
+
+
 def find_media_regions(img_path, layout: Layout, win_w: float, win_h: float,
                        text_boxes: Optional[list[TextBox]] = None,
                        scale: float = 1.0) -> list[MediaRegion]:
     """在聊天区里找出图片/视频区块。
 
-    ★ 用**文字气泡当锚点**，而不是直接扫"非背景像素"。
+    ★ 两种检测取并集，因为不同的图各有各的难点：
 
-    踩过的坑：一开始直接找连续的非背景行段，结果那张打印机照片里有大片
-    浅色区域（拍的白墙），被当成背景，硬生生把 214 点的图片切成
-    46/12/13/13/12 点的碎片，一个都认不出来。
+    **检测一：按行扫非背景像素（细阈值）**
+      适合"截图类"图片。实测那张物流轨迹截图内容是纯白 (255,255,255)，
+      而微信聊天背景是 (250,250,250) —— **只差 5**。
+      阈值给 40 会把图片本身当成背景，碎成 29 段；给 10 就是一整块 247 点。
 
-    现在的做法：先用 OCR 拿到文字气泡的 y 范围，**两张文字消息之间的空隙**
-    如果够高、而且那段里确实有内容，那就是一条媒体消息。文字气泡是
-    天然可靠的锚点。
+    **检测二：用文字气泡当锚点（粗阈值）**
+      适合"照片类"图片。那张打印机照片有大片浅色（拍的白墙，248 左右），
+      细阈值也会把它切碎（46/12/13/13 点）。但文字气泡的间隙是可靠的锚点。
 
-    返回的 pixel_box 是截图内的像素坐标，可直接 PIL.crop。
+    两种都跑，结果合并去重。
     """
     try:
         import numpy as np
@@ -451,9 +504,6 @@ def find_media_regions(img_path, layout: Layout, win_w: float, win_h: float,
     except ImportError:
         log.warning("没装 numpy，跳过媒体区域检测（pip install numpy）")
         return []
-
-    if not text_boxes:
-        return []                    # 没有文字锚点就没法可靠判断
 
     im = Image.open(img_path).convert("RGB")
     full_w, full_h = im.size
@@ -466,117 +516,120 @@ def find_media_regions(img_path, layout: Layout, win_w: float, win_h: float,
     if bot_pt - top_pt < MEDIA_MIN_HEIGHT:
         return []
 
-    # 锚点：文字行范围 + 上下边界
-    anchors = text_row_ranges(text_boxes, layout, win_w, win_h)
-    edges = [top_pt] + [y for rng in anchors for y in rng] + [bot_pt]
-    gaps: list[tuple[float, float]] = []
-    for i in range(0, len(edges) - 1, 2):
-        g0, g1 = edges[i], edges[i + 1]
-        if g1 - g0 >= MEDIA_MIN_HEIGHT:
-            gaps.append((g0, g1))
-    if not gaps:
+    px0 = int(chat_left_pt * scale)
+    py_top = int(top_pt * scale)
+    py_bot = int(bot_pt * scale)
+    # 窗口最右几个点是边框/阴影，实测那一列内容占比 1.000，会把边界拉到窗口边缘
+    px_end = min(full_w, int((win_w - WINDOW_EDGE_INSET) * scale))
+    if px_end <= px0 or py_bot <= py_top:
         return []
 
-    arr = np.asarray(im).astype(np.int16)
+    arr = np.asarray(im).astype(np.int16)[py_top:py_bot, px0:px_end]
+    if arr.size == 0:
+        return []
+
     # 背景色：取聊天区右上角一小块（一定是纯背景，不会压到消息）
-    probe_x0 = int((chat_left_pt + (win_w - chat_left_pt) * 0.55) * scale)
-    probe_x1 = min(full_w, int((win_w - 12) * scale))
-    probe_y0 = int((top_pt + 6) * scale)
-    probe_y1 = min(full_h, int((top_pt + 24) * scale))
-    if probe_x1 > probe_x0 and probe_y1 > probe_y0:
-        bg = np.median(arr[probe_y0:probe_y1, probe_x0:probe_x1].reshape(-1, 3), axis=0)
+    pby0, pby1 = 4, min(arr.shape[0], 40)
+    pbx0 = int(arr.shape[1] * 0.6)
+    if pby1 > pby0 and arr.shape[1] > pbx0:
+        bg = np.median(arr[pby0:pby1, pbx0:].reshape(-1, 3), axis=0).astype(np.int16)
     else:
-        bg = np.array([250, 250, 250])
-    bg = bg.astype(np.int16)
+        bg = np.array([250, 250, 250], dtype=np.int16)
+
+    # 每个检测器的结果分开收集。
+    # ★ 为什么分开：同一个检测器内部需要合并（照片会被内部浅色区切碎），
+    #   但**跨检测器不能合并** —— 实测把上下相邻的「物流轨迹截图」和
+    #   「京东面单照片」并成了一条，视觉模型只能给出一段混合描述。
+    groups: list[list[tuple[int, int, int, int]]] = []
+
+    # ---- 检测一：细阈值按行扫（截图类） ----
+    fine = _content_mask(arr, bg, _MEDIA_PIXEL_DIFF)
+    g1: list[tuple[int, int, int, int]] = []
+    for y0, y1 in _row_runs(fine, scale):
+        box = _tighten_box(fine, y0, y1, px0, px_end, scale, MEDIA_MIN_HEIGHT)
+        if box:
+            g1.append(box)
+    groups.append(g1)
+
+    # ---- 检测二：文字气泡锚点（照片类） ----
+    g2: list[tuple[int, int, int, int]] = []
+    if text_boxes:
+        rows = text_row_ranges(text_boxes, layout, win_w, win_h)
+        edges = [top_pt] + [y for r in rows for y in r] + [bot_pt]
+        coarse = _content_mask(arr, bg, _MEDIA_COARSE_DIFF)
+        for i in range(0, len(edges) - 1, 2):
+            g0, g1 = edges[i], edges[i + 1]
+            if g1 - g0 < MEDIA_MIN_HEIGHT:
+                continue
+            y0 = max(0, int((g0 - top_pt) * scale))
+            y1 = min(arr.shape[0], int((g1 - top_pt) * scale))
+            if y1 <= y0:
+                continue
+            if coarse[y0:y1].mean() < 0.02:
+                continue
+            box = _tighten_box(coarse, y0, y1, px0, px_end, scale, MEDIA_MIN_HEIGHT)
+            if box:
+                g2.append(box)
+    groups.append(g2)
+
+    def _merge_same_group(items: list[tuple[int, int, int, int]]):
+        out: list[tuple[int, int, int, int]] = []
+        for b in sorted(items, key=lambda b: (b[1], b[0])):
+            if out:
+                m = out[-1]
+                overlap_y = b[1] <= m[3] + MEDIA_MERGE_GAP * scale
+                overlap_x = not (b[2] < m[0] - 20 or b[0] > m[2] + 20)
+                if overlap_y and overlap_x:
+                    out[-1] = (min(m[0], b[0]), min(m[1], b[1]),
+                               max(m[2], b[2]), max(m[3], b[3]))
+                    continue
+            out.append(b)
+        return out
+
+    merged: list[tuple[int, int, int, int]] = []
+    for g in groups:
+        merged.extend(_merge_same_group(g))
+
+    # 跨检测器只做去重：重叠面积大的算同一个，保留大的那个
+    def _iou(a, b) -> float:
+        ix = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+        iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+        inter = ix * iy
+        if inter <= 0:
+            return 0.0
+        ua = (a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - inter
+        return inter / ua if ua else 0.0
+
+    dedup: list[tuple[int, int, int, int]] = []
+    for b in sorted(merged, key=lambda b: -(b[2]-b[0])*(b[3]-b[1])):
+        if any(_iou(b, d) > 0.6 for d in dedup):
+            continue
+        dedup.append(b)
+    merged = [m for m in dedup if (m[3] - m[1]) / scale >= MEDIA_MIN_HEIGHT]
 
     out: list[MediaRegion] = []
-    for g0, g1 in gaps:
-        py0, py1 = int(g0 * scale), int(g1 * scale)
-        px0 = int(chat_left_pt * scale)
-        # ★ 右边要往里收一点：窗口最右侧几个像素是边框/阴影，
-        #   实测那一列的内容占比是 1.000，会把边界一路拉到窗口边缘，
-        #   连带把"左右判断"的中心也算歪。
-        px_end = min(full_w, int((win_w - WINDOW_EDGE_INSET) * scale))
-        if px_end <= px0:
-            continue
-        seg = arr[py0:py1, px0:px_end]
-        if seg.size == 0:
-            continue
-        diff = np.abs(seg - bg).sum(axis=2)
-        # 这一段里"有内容"的像素占比要够，否则只是空白
-        if (diff > _MEDIA_PIXEL_DIFF).mean() < 0.02:
-            continue
-        # 先定左右：要求这一列在整段里有四成以上是内容。
-        # 阈值给低了会把头像（占比 0.2）也圈进来。
-        colpct = (diff > _MEDIA_PIXEL_DIFF).sum(axis=0) / max(1, seg.shape[0])
-        nz = np.nonzero(colpct > _MEDIA_COL_DENSE)[0]
-        if len(nz) == 0:
-            continue
-        bx0, bx1 = px0 + int(nz[0]), px0 + int(nz[-1]) + 1
-        if (bx1 - bx0) / scale < 60:
-            continue
-
-        # 再拿这几列反过来收紧上下：这样能甩掉气泡边缘和空白，
-        # 只留真正的图片区域
-        sub = diff[:, int(nz[0]):int(nz[-1]) + 1]
-        subrow = (sub > _MEDIA_PIXEL_DIFF).sum(axis=1) / max(1, sub.shape[1])
-        rnz = np.nonzero(subrow > _MEDIA_ROW_DENSE)[0]
-        if len(rnz) == 0:
-            continue
-        by0, by1 = py0 + int(rnz[0]), py0 + int(rnz[-1]) + 1
-        if (by1 - by0) / scale < MEDIA_MIN_HEIGHT:
-            continue
-
-        py0_old, py1_old = py0, py1
-        py0, py1 = by0, by1
-        # ★ 用**聊天区**中心判断左右，不是窗口中心。
-        #   踩过坑：窗口 880 宽，聊天区是 306~880，中心应该是 593。
-        #   用窗口中心 440 会把偏左的对方图片误判成"自己发的"。
-        center_pt = ((bx0 + bx1) / 2) / scale
+    for x0, y0, x1, y1 in merged:
+        fx0, fy0 = px0 + x0, py_top + y0
+        fx1, fy1 = px0 + x1, py_top + y1
+        center_pt = ((fx0 + fx1) / 2) / scale
         side = "in" if center_pt < (chat_left_pt + win_w) / 2 else "out"
-
         kind = "image"
-        for b in text_boxes:
-            if _DURATION_RE.match(b.text.strip()):
-                bx, by = b.cx * win_w, (1 - b.cy) * win_h
-                near_x = (bx0 / scale - 40) < bx < (bx1 / scale + 40)
-                near_y = (by0 / scale - 40) < by < (by1 / scale + 40)
-                if near_x and near_y:
-                    kind = "video"
-                    break
-
+        if text_boxes:
+            for b in text_boxes:
+                if _DURATION_RE.match(b.text.strip()):
+                    bx, by = b.cx * win_w, (1 - b.cy) * win_h
+                    near_x = (fx0 / scale - 40) < bx < (fx1 / scale + 40)
+                    near_y = (fy0 / scale - 40) < by < (fy1 / scale + 40)
+                    if near_x and near_y:
+                        kind = "video"
+                        break
         out.append(MediaRegion(
-            kind=kind,
-            side=side,
-            bbox=(bx0 / full_w, 1 - py1 / full_h, bx1 / full_w, 1 - py0 / full_h),
-            top=1 - py0 / full_h,
-            pixel_box=(bx0, py0, bx1, py1),
+            kind=kind, side=side,
+            bbox=(fx0 / full_w, 1 - fy1 / full_h, fx1 / full_w, 1 - fy0 / full_h),
+            top=1 - fy0 / full_h,
+            pixel_box=(fx0, fy0, fx1, fy1),
         ))
-
-    # ★ 合并纵向相邻的区块。
-    #   踩过坑：图片里的印刷文字（标签上的 "Canon"）会被 OCR 当成文字锚点，
-    #   把一整张图切成上下两段。两段之间只差十几点，合并回来。
-    merged_regions: list[MediaRegion] = []
-    for r in sorted(out, key=lambda r: r.pixel_box[1]):
-        if merged_regions:
-            last = merged_regions[-1]
-            gap_pt = (r.pixel_box[1] - last.pixel_box[3]) / scale
-            if gap_pt < MEDIA_MERGE_GAP:
-                x0 = min(last.pixel_box[0], r.pixel_box[0])
-                y0 = min(last.pixel_box[1], r.pixel_box[1])
-                x1 = max(last.pixel_box[2], r.pixel_box[2])
-                y1 = max(last.pixel_box[3], r.pixel_box[3])
-                center_pt = ((x0 + x1) / 2) / scale
-                merged_regions[-1] = MediaRegion(
-                    kind=last.kind if last.kind == r.kind else "image",
-                    side="in" if center_pt < (chat_left_pt + win_w) / 2 else "out",
-                    bbox=(x0 / full_w, 1 - y1 / full_h, x1 / full_w, 1 - y0 / full_h),
-                    top=1 - y0 / full_h,
-                    pixel_box=(x0, y0, x1, y1),
-                )
-                continue
-        merged_regions.append(r)
-    return merged_regions
+    return out
 
 
 # 视频封面上的时长标记，如 "0:15" / "1:02:33"

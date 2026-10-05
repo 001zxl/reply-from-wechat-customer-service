@@ -41,13 +41,13 @@
     {
       "id": "deepseek-vision",
       "label": "DeepSeek V4 Flash Vision（看图用）",
-      "note": "多模态，专门用来理解商家发来的图片/截图。一张图最多 384 token，价格与 Flash 一致。注意这是思考模型，max_tokens 必须给足 （给 600 会被思考吃光、返回空字符串且不报错）",
+      "note": "多模态，专门用来理解商家发来的图片/截图。一张图最多 384 token，价格与 Flash 一致。注意这是思考模型，max_tokens 必须给足 （给 2500 仍可能被吃光、返回空字符串且不报错，实测要 6000）",
       "base_url": "https://api.deepseek.com/v1",
       "model": "deepseek-v4-flash-vision-exp",
       "api_key_env": "DEEPSEEK_API_KEY",
       "enabled": true,
       "temperature": 0.2,
-      "max_tokens": 2500
+      "max_tokens": 6000
     },
     {
       "id": "qwen-plus",
