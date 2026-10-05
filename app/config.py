@@ -135,6 +135,12 @@ class Settings:
         default_factory=lambda: int(_env("CIRCUIT_BREAKER_COOLDOWN_MINUTES", "30") or 30)
     )
 
+    # 收到语音消息时，点微信自带的「转文字」把内容读出来。
+    # 点一下只是让微信显示转写结果，不会发出任何消息。
+    transcribe_voice: bool = field(
+        default_factory=lambda: _env("WECHAT_TRANSCRIBE_VOICE", "1") not in ("0", "false", "no")
+    )
+
     # 读消息前先把聊天区滚到底。
     # ★ 为什么必须：截屏只能看到当前可见的部分。如果聊天区没停在最新消息处
     #   （人在翻历史、WeChat 没自动跟随、窗口在后台），新消息就在可视区下方，

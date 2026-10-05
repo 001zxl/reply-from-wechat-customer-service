@@ -52,7 +52,9 @@ from .vision_common import (
     _norm,
     _similar,
     clean_title,
+    _VOICE_DUR_RE,
     find_media_regions,
+    find_voice_bubbles,
     new_suffix,
     parse_messages,
     pick_titles,
@@ -420,6 +422,81 @@ class MacWeChatVisionChannel:
         with _guarded("read_messages", chat):
             return self._read_messages(chat)
 
+    # ---------------- 语音转写 ----------------
+    def transcribe_voices(self, win, boxes) -> dict[float, str]:
+        """把屏幕上可见的语音消息转成文字。
+
+        做法：**复用微信自带的「转文字」**——点一下语音气泡旁边的按钮，
+        微信自己把语音转成文字显示出来，我们再 OCR 读回来。
+
+        为什么不直接拿音频：微信本地语音文件是加密的，而且我们不碰微信进程。
+
+        返回 {语音气泡顶部的 y（逻辑点）: 转写文字}，配对不上就返回 {}。
+        """
+        voices = [v for v in find_voice_bubbles(boxes, self.layout, win.w, win.h)
+                  if v.button_xy]
+        if not voices:
+            return {}
+
+        before = {(int(b.cx * win.w), int((1 - b.cy) * win.h)): b.text
+                  for b in boxes}
+
+        clicked = 0
+        for v in voices:
+            bx, by = v.button_xy
+            # 安全检查：只点聊天区里的按钮，别点到列表或输入框上
+            if not (self.layout.chat_left(win.w) < bx < win.w - 20):
+                log.warning("「转文字」按钮位置异常（%s,%s），跳过", bx, by)
+                continue
+            if not (self.layout.title_h < by < win.h - self.layout.input_h):
+                log.warning("「转文字」按钮不在消息区（%s,%s），跳过", bx, by)
+                continue
+            log.info("点击「转文字」：气泡 %.0f 秒，按钮 (%s,%s)", v.seconds, bx, by)
+            screen.click(win.x + bx, win.y + by)
+            clicked += 1
+            time.sleep(1.4)          # 等微信把转写结果画出来
+
+        if not clicked:
+            return {}
+        time.sleep(0.8)
+
+        # 重新截屏，找出"转写前没有、转写后出现"的文字
+        _p2, png2 = self.screenshot("transcribed")
+        boxes2 = ocr_image(png2)
+        chat_left = self.layout.chat_left(win.w)
+        y_low, y_high = self.layout.message_band(win.h)
+
+        fresh: list[tuple[float, str]] = []
+        for b in boxes2:
+            if b.cx * win.w < chat_left:
+                continue
+            if not (y_low * win.h < (1 - b.cy) * win.h < y_high * win.h):
+                continue
+            key = (int(b.cx * win.w), int((1 - b.cy) * win.h))
+            if key in before:
+                continue
+            # 转写结果不可能是时长标记或按钮本身
+            txt = b.text.strip()
+            if not txt or _VOICE_DUR_RE.match(txt) or "转文字" in txt:
+                continue
+            fresh.append(((1 - b.cy) * win.h, txt))
+
+        if not fresh:
+            log.info("点了 %d 个「转文字」但没读到新文字（可能微信没开这个功能）", clicked)
+            return {}
+
+        # 配对：转写结果显示在语音气泡**下面**，取每个气泡下方最近的那条
+        result: dict[float, str] = {}
+        for v in voices:
+            cands = [t for t in fresh if v.pixel_box[3] - 6 <= t[0] <= v.pixel_box[3] + 90]
+            if not cands:
+                continue
+            cands.sort(key=lambda t: t[0])
+            result[v.top_pt] = cands[0][1]
+        log.info("语音转写成功 %d 条：%s", len(result),
+                 "；".join(f"{k:.0f}→{v[:16]}" for k, v in result.items()))
+        return result
+
     def _read_media(self, png: str, boxes, win) -> list[Observed]:
         """把聊天区里的图片/视频区块也变成消息（文字之外的那部分）。"""
         try:
@@ -570,6 +647,29 @@ class MacWeChatVisionChannel:
             kept_boxes = [b for b in boxes if not _in_media(b)]
 
         msgs = parse_messages(kept_boxes, self.layout, win.w, win.h)
+
+        # 语音消息：点微信自带的「转文字」把内容读出来。
+        # 放在这里是因为需要"转写前/转写后"两次截屏对比。
+        if settings.transcribe_voice:
+            try:
+                voices = find_voice_bubbles(kept_boxes, self.layout, win.w, win.h)
+                if any(v.button_xy for v in voices):
+                    transcriptions = self.transcribe_voices(win, kept_boxes)
+                    if transcriptions:
+                        for m in msgs:
+                            if not _VOICE_DUR_RE.match(m.text.strip()):
+                                continue
+                            # 按位置找对应的转写（气泡顶部 y 差了不超过 12 点）
+                            best, best_d = None, 13.0
+                            for top_y, txt in transcriptions.items():
+                                d = abs(top_y - (1 - m.top) * win.h)
+                                if d < best_d:
+                                    best, best_d = txt, d
+                            if best:
+                                m.voice_text = best
+            except Exception:
+                log.exception("语音转写失败（不影响读文字）")
+
         if media:
             msgs = sorted(msgs + media, key=lambda m: -m.top)
         return msgs

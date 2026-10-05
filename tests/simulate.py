@@ -574,6 +574,57 @@ async def main() -> int:
     check("S21 客服提示词禁止在两个不一致的号码里挑一个",
           "挑一个" in _SP2 or "不一致" in _SP2)
 
+    # ---------------- S22 语音转写 ----------------
+    # 微信本地语音文件是加密的，我们不碰进程，所以拿不到音频。
+    # 做法是**复用微信自带的「转文字」**：点语音气泡旁边的按钮，
+    # 微信自己把语音转成文字显示出来，我们再 OCR 读回来。
+    from adapters.vision_common import (find_voice_bubbles, _VOICE_DUR_RE,
+                                        DEFAULT_LAYOUT)
+    from bridge.vision_ocr import TextBox as _TBox
+    from adapters.macos_vision import MacWeChatVisionChannel as _MC
+
+    for raw, secs in [('3"', 3), ('3"（', 3), ('• 3"', 3), ('小 3"', 3),
+                      ('12"', 12), ('• 3" •', 3)]:
+        _m = _VOICE_DUR_RE.match(raw)
+        check(f"S22 认得语音时长标记 {raw!r}", bool(_m) and int(_m.group(1)) == secs)
+
+    for not_voice in ("单号 773123456789012", "3件货", "2026-07-24", "转文字"):
+        check(f"S22 不把 {not_voice[:12]!r} 当语音时长",
+              _VOICE_DUR_RE.match(not_voice) is None)
+
+    _W2, _H2 = 880, 640
+    _vb = [
+        _TBox(text='3"', x=400/_W2, y=1-(440/_H2), w=0.02, h=0.02, conf=0.9),
+        _TBox(text='转文字', x=520/_W2, y=1-(445/_H2), w=0.05, h=0.02, conf=0.9),
+        _TBox(text='5"', x=700/_W2, y=1-(380/_H2), w=0.02, h=0.02, conf=0.9),
+    ]
+    _vs = find_voice_bubbles(_vb, DEFAULT_LAYOUT, _W2, _H2)
+    check("S22 找得到语音气泡", len(_vs) == 2, f"实际 {len(_vs)}")
+    _in = [v for v in _vs if v.side == "in"]
+    _out = [v for v in _vs if v.side == "out"]
+    check("S22 对方那条带「转文字」按钮",
+          bool(_in) and _in[0].button_xy is not None)
+    check("S22 自己那条不带按钮（微信不给自己语音显示）",
+          bool(_out) and _out[0].button_xy is None)
+    check("S22 时长读对了", bool(_in) and _in[0].seconds == 3)
+
+    from app.config import settings as _st2
+    check("S22 默认开启语音转写", _st2.transcribe_voice is True)
+    check("S22 适配器提供了转写方法",
+          hasattr(_MC, "transcribe_voices"))
+    import inspect as _i3
+    _rsrc = _i3.getsource(_MC._read_messages)
+    check("S22 _read_messages 里真的调用了转写",
+          "transcribe_voices" in _rsrc)
+    _tsrc = _i3.getsource(_MC.transcribe_voices)
+    check("S22 点按钮前做了安全检查（只在聊天区内点）",
+          "chat_left" in _tsrc and "按钮位置异常" in _tsrc)
+    check("S22 转写失败不影响读文字", "不影响读文字" in _rsrc)
+
+    _envtxt2 = (_ROOT / ".env.example").read_text(encoding="utf-8")
+    check("S22 配置模板里有 WECHAT_TRANSCRIBE_VOICE",
+          "WECHAT_TRANSCRIBE_VOICE=" in _envtxt2)
+
     await pipeline.stop()
 
     # ---------------- S11 安全兜底：不依赖模型给的 intent ----------------

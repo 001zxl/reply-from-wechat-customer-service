@@ -80,6 +80,7 @@ class Observed:
     media: str = ""
     media_box: tuple = ()
     media_path: str = ""     # 已裁好的图片文件，流水线直接拿去分析
+    voice_text: str = ""     # 语音转写出来的文字（微信「转文字」的结果）
 
     @property
     def fingerprint(self) -> str:
@@ -239,7 +240,8 @@ _TIME_QUOTES = "\"\u201c\u201d'\u2019"
 #     '3"（'      '• 3"'      '• 3" • 转文字'
 # 不归一的话，模型会把这些碎片当成商家打的字。
 VOICE_ARTIFACT_RE = re.compile(
-    r"^[\u2022\u00b7\u3002\s]*\d{1,3}\s*[" + _TIME_QUOTES + r"]?\s*[\uff08(]?\s*$"
+    r"^[\u2022\u00b7\u3002\s]*\d{1,3}\s*[" + _TIME_QUOTES + r"]?"
+    r"\s*[\uff08(]?[\u2022\u00b7\u3002\s]*$"
 )
 VOICE_MARKERS = ("转文字", "转成文字")
 
@@ -639,3 +641,94 @@ def find_media_regions(img_path, layout: Layout, win_w: float, win_h: float,
 
 # 视频封面上的时长标记，如 "0:15" / "1:02:33"
 _DURATION_RE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
+
+
+# ======================================================================
+# 语音消息检测与转写
+# ======================================================================
+#
+# 为什么不能直接拿音频：微信本地语音文件是加密的（且我们不碰微信进程）。
+# 好在**微信自带「转文字」功能** —— 语音气泡旁边就有这个按钮，点一下
+# 微信自己把语音转成文字显示出来，我们再 OCR 读回来。
+#
+# 这样做的代价是：点击会改变界面状态（转写结果会留在屏幕上），
+# 但这跟用户自己点一下「转文字」没区别，不会发出任何消息。
+#
+# 实测语音气泡的 OCR 形态（微信 4.1.13 macOS）：
+#     '3"'      '3"（'      '• 3"'      '小 3"'      '• 3" • 转文字'
+# 时长标记旁边的「转文字」按钮是我们点击的目标。
+
+# 语音气泡上的时长标记："3"" / "• 3"（" / "12""
+_VOICE_DUR_RE = re.compile(
+    r"^[\u2022\u00b7\u3002\u5c0f\s]*(\d{1,3})\s*[" + _TIME_QUOTES + r"]"
+    r"\s*[\uff08(]?[\u2022\u00b7\u3002\s]*$"      # 尾部也可能有圆点
+)
+_TRANSCRIBE_LABEL = "转文字"
+
+
+@dataclass
+class VoiceBubble:
+    """一条语音消息在屏幕上的位置。"""
+
+    side: str                    # in | out
+    seconds: int                 # 时长（秒），读不到就是 0
+    # 语音气泡本身的位置（像素，原点左上）
+    pixel_box: tuple[int, int, int, int]
+    # 「转文字」按钮的位置（像素中心，原点左上）；没有按钮就是 None
+    button_xy: Optional[tuple[int, int]] = None
+    # 气泡所在的 y（逻辑点），用来配对转写结果
+    top_pt: float = 0.0
+
+
+def find_voice_bubbles(text_boxes: list[TextBox], layout: Layout,
+                       win_w: float, win_h: float) -> list[VoiceBubble]:
+    """从 OCR 结果里找出语音气泡。
+
+    靠时长标记（`3"`）定位：微信的语音气泡只画一个波形图标加时长，
+    没有别的可识别文字。找到时长标记后，气泡就在它左（对方）或右（自己）。
+    """
+    chat_left = layout.norm_chat_left(win_w)
+    y_low, y_high = layout.message_band(win_h)
+    inside = [b for b in text_boxes
+              if b.cx > chat_left and y_low < b.cy < y_high and b.text.strip()]
+
+    durs: list[tuple[TextBox, int]] = []
+    for b in inside:
+        m = _VOICE_DUR_RE.match(b.text.strip())
+        if m:
+            durs.append((b, int(m.group(1))))
+    if not durs:
+        return []
+
+    buttons = [b for b in inside if _TRANSCRIBE_LABEL in b.text]
+
+    out: list[VoiceBubble] = []
+    for b, secs in durs:
+        a, c = b.cx - b.w / 2, b.cx + b.w / 2
+        top_pt = (1 - (b.cy + b.h / 2)) * win_h
+        bot_pt = (1 - (b.cy - b.h / 2)) * win_h
+        # 时长标记在气泡里的位置：
+        #   对方的气泡：波形在左、时长在右 → 气泡向左延展
+        #   自己的气泡：时长在左、波形在右 → 气泡向右延展
+        center = (a + c) / 2 * win_w
+        side = "in" if center < (chat_left + win_w) / 2 else "out"
+        if side == "in":
+            bx0, bx1 = a * win_w - 90, c * win_w + 12
+        else:
+            bx0, bx1 = a * win_w - 12, c * win_w + 90
+
+        # 找最近的「转文字」按钮（在气泡右边一点，或下一行）
+        btn = None
+        best = 1e9
+        for t in buttons:
+            tx, ty = t.cx * win_w, (1 - t.cy) * win_h
+            if bx1 - 20 < tx < bx1 + 120 and top_pt - 30 < ty < bot_pt + 40:
+                d = abs(tx - bx1) + abs(ty - top_pt)
+                if d < best:
+                    best, btn = d, (int(tx), int(ty))
+        out.append(VoiceBubble(
+            side=side, seconds=secs,
+            pixel_box=(int(bx0), int(top_pt), int(bx1), int(bot_pt)),
+            button_xy=btn, top_pt=top_pt,
+        ))
+    return out
