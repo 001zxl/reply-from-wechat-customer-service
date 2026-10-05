@@ -55,6 +55,8 @@ from .vision_common import (
     _VOICE_DUR_RE,
     find_media_regions,
     find_voice_bubbles,
+    is_voice_msg,
+    merge_voice_transcripts,
     new_suffix,
     parse_messages,
     pick_titles,
@@ -648,25 +650,33 @@ class MacWeChatVisionChannel:
 
         msgs = parse_messages(kept_boxes, self.layout, win.w, win.h)
 
-        # 语音消息：点微信自带的「转文字」把内容读出来。
-        # 放在这里是因为需要"转写前/转写后"两次截屏对比。
+        # 语音消息转文字。有两条路，按顺序试：
+        #
+        # 路一：**微信已经自动转写了**（设置里开了"语音消息自动转文字"）。
+        #   这种情况下转写结果会作为一条独立的灰色气泡显示在语音气泡
+        #   正下方，看起来像另一条消息。要把它认出来并合并回去，
+        #   否则 AI 会以为商家发了语音 + 一条文字两条消息。
+        #   实测形态（微信 4.1.13 macOS）：
+        #       🔊 2"                    ← 语音气泡
+        #       你们明天几点上班儿？       ← 转写结果，紧跟其后
+        #
+        # 路二：微信没自动转写 → 点气泡旁边的「转文字」按钮，再读回来。
         if settings.transcribe_voice:
             try:
+                msgs = merge_voice_transcripts(msgs, win.h)
                 voices = find_voice_bubbles(kept_boxes, self.layout, win.w, win.h)
-                if any(v.button_xy for v in voices):
+                need = [m for m in msgs
+                        if is_voice_msg(m.text) and not m.voice_text]
+                if need and any(v.button_xy for v in voices):
                     transcriptions = self.transcribe_voices(win, kept_boxes)
-                    if transcriptions:
-                        for m in msgs:
-                            if not _VOICE_DUR_RE.match(m.text.strip()):
-                                continue
-                            # 按位置找对应的转写（气泡顶部 y 差了不超过 12 点）
-                            best, best_d = None, 13.0
-                            for top_y, txt in transcriptions.items():
-                                d = abs(top_y - (1 - m.top) * win.h)
-                                if d < best_d:
-                                    best, best_d = txt, d
-                            if best:
-                                m.voice_text = best
+                    for m in need:
+                        best, best_d = None, 13.0
+                        for top_y, txt in transcriptions.items():
+                            d = abs(top_y - (1 - m.top) * win.h)
+                            if d < best_d:
+                                best, best_d = txt, d
+                        if best:
+                            m.voice_text = best
             except Exception:
                 log.exception("语音转写失败（不影响读文字）")
 

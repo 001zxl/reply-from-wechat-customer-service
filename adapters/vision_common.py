@@ -732,3 +732,48 @@ def find_voice_bubbles(text_boxes: list[TextBox], layout: Layout,
             button_xy=btn, top_pt=top_pt,
         ))
     return out
+
+
+# 语音气泡和它的转写结果之间的最大纵向距离（逻辑点）
+VOICE_TRANSCRIPT_GAP = 70.0
+
+
+def is_voice_msg(text: str) -> bool:
+    """这条消息是不是语音。
+
+    ★ 要按**归一后**的形态判断（`[语音 2秒]`），不能再用 _VOICE_DUR_RE
+    去匹配原始 OCR 文本（`2"` / `• 2"`）—— parse_messages 已经把原始形态
+    归一过了。实测踩过这个坑，导致转写结果没能合并回语音消息。
+    """
+    return (text or "").strip().startswith("[语音")
+
+
+def merge_voice_transcripts(msgs: list[Observed], win_h: float,
+                            gap_pt: float = VOICE_TRANSCRIPT_GAP) -> list[Observed]:
+    """把微信自动转写出来的那条灰色气泡，合并回它对应的语音消息。
+
+    微信开启"语音消息自动转文字"后，转写结果会作为**下一条气泡**显示：
+    左对齐、紧跟语音气泡、没有单独的头像。实测形态（微信 4.1.13 macOS）：
+
+        🔊 2"                    ← 语音气泡
+        你们明天几点上班儿？       ← 转写结果，看起来像另一条消息
+
+    不合并的话 AI 会以为商家发了**两条**消息（一条语音 + 一条文字）。
+    """
+    out: list[Observed] = []
+    i = 0
+    while i < len(msgs):
+        m = msgs[i]
+        if is_voice_msg(m.text) and not m.voice_text and i + 1 < len(msgs):
+            nxt = msgs[i + 1]
+            # top 是归一化 y，越大越靠上；两条的间距换算成逻辑点
+            gap = (m.top - nxt.top) * win_h
+            if (nxt.side == m.side and 0 < gap <= gap_pt
+                    and not nxt.media and not is_voice_msg(nxt.text)):
+                m.voice_text = nxt.text.strip()
+                out.append(m)
+                i += 2
+                continue
+        out.append(m)
+        i += 1
+    return out

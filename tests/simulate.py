@@ -625,6 +625,60 @@ async def main() -> int:
     check("S22 配置模板里有 WECHAT_TRANSCRIBE_VOICE",
           "WECHAT_TRANSCRIBE_VOICE=" in _envtxt2)
 
+    # --- 微信自动转写的结果要合并回语音消息 ---
+    # 实测形态：语音气泡下面紧跟一条灰色气泡（转写结果），看起来像另一条消息。
+    # 不合并的话 AI 会以为商家发了「语音 + 文字」两条。
+    from adapters.vision_common import (merge_voice_transcripts, is_voice_msg,
+                                        Observed as _Obs)
+    _H3 = 640.0
+
+    check("S22 按归一后的形态认语音（不是原始 2\"）", is_voice_msg("[语音 2秒]"))
+    check("S22 普通文字不是语音", not is_voice_msg("你们明天几点上班儿？"))
+
+    # 真实场景：语音 + 紧跟其下的转写
+    _rows = [
+        _Obs(side="in", text="[语音 2秒]", top=1 - 400/_H3),
+        _Obs(side="in", text="你们明天几点上班儿？", top=1 - 435/_H3),
+    ]
+    _mq = merge_voice_transcripts(_rows, _H3)
+    check("S22 转写结果合并回语音（2 条并成 1 条）", len(_mq) == 1, f"实际 {len(_mq)}")
+    check("S22 合并后转写内容正确",
+          bool(_mq) and _mq[0].voice_text == "你们明天几点上班儿？")
+    check("S22 合并后消息文本仍是 [语音 2秒]",
+          bool(_mq) and _mq[0].text == "[语音 2秒]")
+
+    # 距离太远的不合并（那是另一条真消息）
+    _far = [
+        _Obs(side="in", text="[语音 2秒]", top=1 - 200/_H3),
+        _Obs(side="in", text="另一条独立消息", top=1 - 400/_H3),
+    ]
+    _mf = merge_voice_transcripts(_far, _H3)
+    check("S22 隔得远的文字不合并（是另一条消息）", len(_mf) == 2)
+    check("S22 没合并的语音 voice_text 为空",
+          all(not m.voice_text for m in _mf))
+
+    # 左右不同侧的不合并
+    _cross = [
+        _Obs(side="in", text="[语音 2秒]", top=1 - 400/_H3),
+        _Obs(side="out", text="我回你", top=1 - 435/_H3),
+    ]
+    check("S22 不同侧的文字不合并", len(merge_voice_transcripts(_cross, _H3)) == 2)
+
+    # 两条语音贴在一起时不能互相吃掉
+    _two = [
+        _Obs(side="in", text="[语音 2秒]", top=1 - 400/_H3),
+        _Obs(side="in", text="[语音 3秒]", top=1 - 435/_H3),
+    ]
+    check("S22 两条语音不会互相合并", len(merge_voice_transcripts(_two, _H3)) == 2)
+
+    # 已经有转写的不要再合并一次
+    _done = [
+        _Obs(side="in", text="[语音 2秒]", top=1 - 400/_H3, voice_text="已经转过"),
+        _Obs(side="in", text="后面的消息", top=1 - 435/_H3),
+    ]
+    _md = merge_voice_transcripts(_done, _H3)
+    check("S22 已转过的不重复合并", len(_md) == 2 and _md[0].voice_text == "已经转过")
+
     await pipeline.stop()
 
     # ---------------- S11 安全兜底：不依赖模型给的 intent ----------------
