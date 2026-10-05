@@ -679,6 +679,29 @@ async def main() -> int:
     _md = merge_voice_transcripts(_done, _H3)
     check("S22 已转过的不重复合并", len(_md) == 2 and _md[0].voice_text == "已经转过")
 
+    # --- 语音的三种最终文本 ---
+    from adapters.macos_vision import _voice_text_for
+    _v1 = _voice_text_for(_Obs(side="in", text="[语音 4秒]", voice_text="你们几点上班"), "")
+    check("S22 转写成功 → 语音标记 + 内容", _v1 == "[语音 4秒] 你们几点上班")
+    _v2 = _voice_text_for(_Obs(side="in", text="[语音 47秒]"), "")
+    check("S22 转写失败 → 明确标出「未能转写」", _v2 == "[语音 47秒，未能转写]")
+    check("S22 失败标记里保留了时长（AI 知道是长语音）", "47秒" in _v2)
+    _v3 = _voice_text_for(_Obs(side="in", text="单号773123"), "单号773123")
+    check("S22 非语音消息原样返回", _v3 == "单号773123")
+
+    # --- 方言 + 上下文规则必须在提示词里 ---
+    from app.prompts import SYSTEM_PROMPT as _SP3
+    check("S22 提示词说明语音转写可能有方言错字", "方言" in _SP3)
+    check("S22 提示词给了同音字错例", "同音字" in _SP3)
+    check("S22 提示词有方言对照表", "件道哪了" in _SP3 and "改地儿" in _SP3)
+    check("S22 提示词红线：数字绝对不能猜", "数字绝对不能猜" in _SP3)
+    check("S22 提示词要求两种以上解释时先确认", "两种以上" in _SP3)
+    check("S22 提示词要求有后果的操作先复述", "复述" in _SP3)
+    check("S22 提示词说要优先用网点自己的方言表",
+          "优先按那个对照表" in _SP3)
+    _kn = (_ROOT / "config" / "knowledge.md").read_text(encoding="utf-8")
+    check("S22 知识库模板里有方言对照段", "方言" in _kn and "到哪哈了" in _kn)
+
     await pipeline.stop()
 
     # ---------------- S11 安全兜底：不依赖模型给的 intent ----------------

@@ -96,6 +96,23 @@ def _guarded(action: str, target: str, note: str = ""):
     return guard.scope(action, target, note=note)
 
 
+def _voice_text_for(m, fallback: str) -> str:
+    """语音消息最终给流水线的文本。
+
+    三种情况分清楚，让客服模型知道该怎么办：
+      · 转写成功    → "[语音 4秒] 你们明天几点上班儿？"
+      · 转写失败    → "[语音 12秒，未能转写]"    → AI 要说明听不到并索要文字
+      · 不是语音    → 原样
+    """
+    if m is None:
+        return fallback
+    if getattr(m, "voice_text", ""):
+        return f"{m.text} {m.voice_text}"
+    if (m.text or "").strip().startswith("[语音"):
+        return m.text.replace("]", "，未能转写]")
+    return fallback
+
+
 class WeChatNotRunning(RuntimeError):
     """微信没开。调用方应该提示用户，而不是抛一堆栈。"""
 
@@ -484,7 +501,26 @@ class MacWeChatVisionChannel:
             fresh.append(((1 - b.cy) * win.h, txt))
 
         if not fresh:
-            log.info("点了 %d 个「转文字」但没读到新文字（可能微信没开这个功能）", clicked)
+            # 重试一次：微信的转写有时要久一点才画出来
+            log.info("第一次点「转文字」没读到新文字，等久一点重试")
+            time.sleep(2.5)
+            _p3, png3 = self.screenshot("transcribed2")
+            for b in ocr_image(png3):
+                if b.cx * win.w < chat_left:
+                    continue
+                key = (int(b.cx * win.w), int((1 - b.cy) * win.h))
+                txt = b.text.strip()
+                if key in before or not txt:
+                    continue
+                if _VOICE_DUR_RE.match(txt) or "转文字" in txt:
+                    continue
+                fresh.append(((1 - b.cy) * win.h, txt))
+            if fresh:
+                log.info("重试后读到了 %d 条转写", len(fresh))
+
+        if not fresh:
+            log.warning("点了 %d 个「转文字」仍读不到内容。"
+                        "检查微信设置 → 通用 → 语音消息自动转文字 是否开启", clicked)
             return {}
 
         # 配对：转写结果显示在语音气泡**下面**，取每个气泡下方最近的那条
