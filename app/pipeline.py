@@ -88,7 +88,8 @@ class Pipeline:
         self.workers: dict[str, asyncio.Task] = {}
         self._running = False
         self.stats = {"received": 0, "composed": 0, "deduped": 0, "ignored": 0,
-                      "drafts": 0, "sent": 0, "blocked": 0, "unknown": 0, "failed": 0, "paused": 0}
+                      "drafts": 0, "sent": 0, "blocked": 0, "unknown": 0, "failed": 0, "paused": 0,
+            "media": 0, "media_ok": 0, "media_failed": 0}
 
     # ---------------- 生命周期 ----------------
     async def start(self) -> None:
@@ -108,6 +109,12 @@ class Pipeline:
     # ---------------- 入站 ----------------
     async def submit(self, msg: IncomingMessage) -> SubmitResult:
         self.stats["received"] += 1
+
+        # 非文字消息（图片/视频）：先送视觉模型看懂，再当成普通消息往下走。
+        # 放在这里是因为 submit 是异步的，而视觉调用要几秒；
+        # 图片内容分析完之后 msg.text 就是一段描述，后面所有逻辑都不用改。
+        if msg.media and msg.media_path:
+            await self._understand_media(msg)
 
         rule = policy.conversation_rule(msg.channel, msg.channel_chat_id)
         if rule is None:
@@ -470,6 +477,34 @@ class Pipeline:
             self.stats["failed"] += 1
             self._note_failure(conv_id, f"发送失败：{result.detail[:60]}")
         return result.status
+
+    # ---------------- 非文字消息理解 ----------------
+    async def _understand_media(self, msg: IncomingMessage) -> None:
+        """把图片/视频封面送视觉模型，用得到的描述替换消息文本。"""
+        from .media import describe_media
+
+        try:
+            res = await describe_media(
+                msg.media_path, (0, 0, 0, 0),   # 已经是裁好的图，不需要再裁
+                kind=msg.media, conversation=msg.conversation_id,
+            )
+        except Exception:
+            log.exception("媒体理解异常")
+            msg.text = f"[商家发来一张{'视频' if msg.media == 'video' else '图片'}]（识别失败）"
+            return
+
+        self.stats["media"] = self.stats.get("media", 0) + 1
+        if res.ok:
+            msg.text = res.text
+            self.stats["media_ok"] = self.stats.get("media_ok", 0) + 1
+            log.info("媒体理解完成（%s，%.1fs，缓存=%s，%d 字）",
+                     msg.media, res.seconds, res.cached, len(res.text))
+        else:
+            # 看不懂也要让 AI 知道"来了张图，但没看清"，否则它会以为没收到东西
+            msg.text = (f"[商家发来一张{'视频' if msg.media == 'video' else '图片'}，"
+                        f"但系统没能识别出内容]")
+            self.stats["media_failed"] = self.stats.get("media_failed", 0) + 1
+            log.warning("媒体理解失败：%s", res.error)
 
     # ---------------- 风控 6：熔断 ----------------
     def _note_failure(self, conv_id: str, reason: str) -> None:

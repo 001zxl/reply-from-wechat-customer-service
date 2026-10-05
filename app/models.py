@@ -168,6 +168,25 @@ def set_active(profile_id: str) -> tuple[bool, str]:
     return True, f"已切换到 {p.label}（{p.model}）"
 
 
+def vision_profile() -> Optional[ModelProfile]:
+    """看图片用的多模态模型。
+
+    config/models.json 里的 "vision" 指定用哪个档案；不填就自动找
+    id 以 vision 结尾或 label 含 Vision 的那个。
+    文本模型和视觉模型是分开的：便宜的模型出回复，需要看图时才调视觉模型。
+    """
+    vid = str(_read_config().get("vision") or "").strip()
+    if vid:
+        p = get(vid)
+        if p and p.configured:
+            return p
+    for p in profiles():
+        if p.id.endswith("-vision") or "vision" in p.id.lower():
+            if p.configured:
+                return p
+    return None
+
+
 def active_llm_config() -> dict[str, Any]:
     """给 app/config.py 和 app/llm.py 用的当前模型参数。"""
     p = active_profile()

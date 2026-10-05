@@ -11,7 +11,8 @@
     "model     要传给接口的模型名，要和厂商文档一致",
     "api_key_env  密钥从哪个环境变量读",
     "enabled   先设 false 可以在切换列表里隐藏掉",
-    "note      给人看的说明，会显示在界面上"
+    "note      给人看的说明，会显示在界面上",
+    "vision 字段（可选）：指定用哪个档案看图片。不填就自动找 id=deepseek-vision 的。文本模型和视觉模型是分开的 —— 便宜的出回复，需要看图时才调视觉模型。"
   ],
   "active": "deepseek-flash",
   "profiles": [
@@ -35,6 +36,17 @@
       "api_key_env": "DEEPSEEK_API_KEY",
       "enabled": true,
       "temperature": 0.3,
+      "max_tokens": 2500
+    },
+    {
+      "id": "deepseek-vision",
+      "label": "DeepSeek V4 Flash Vision（看图用）",
+      "note": "多模态，专门用来理解商家发来的图片/截图。一张图最多 384 token，价格与 Flash 一致。注意这是思考模型，max_tokens 必须给足 （给 600 会被思考吃光、返回空字符串且不报错）",
+      "base_url": "https://api.deepseek.com/v1",
+      "model": "deepseek-v4-flash-vision-exp",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "enabled": true,
+      "temperature": 0.2,
       "max_tokens": 2500
     },
     {
@@ -70,5 +82,6 @@
       "temperature": 0.3,
       "max_tokens": 2500
     }
-  ]
+  ],
+  "vision": "deepseek-vision"
 }

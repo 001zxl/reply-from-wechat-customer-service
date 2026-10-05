@@ -12,3 +12,5 @@ dist/
 .DS_Store
 Thumbs.db
 diagnose-report.txt
+data/media/
+data/media_cache.json

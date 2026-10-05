@@ -52,6 +52,7 @@ from .vision_common import (
     _norm,
     _similar,
     clean_title,
+    find_media_regions,
     new_suffix,
     parse_messages,
     pick_titles,
@@ -419,6 +420,33 @@ class MacWeChatVisionChannel:
         with _guarded("read_messages", chat):
             return self._read_messages(chat)
 
+    def _read_media(self, png: str, boxes, win) -> list[Observed]:
+        """把聊天区里的图片/视频区块也变成消息（文字之外的那部分）。"""
+        try:
+            scale = screen.image_size(png)[0] / win.w if win.w else 2.0
+        except Exception:
+            scale = 2.0
+        out: list[Observed] = []
+        for i, r in enumerate(find_media_regions(png, self.layout, win.w, win.h, boxes, scale)):
+            # 立刻把图裁出来存盘（不调模型，很快）。
+            # 视觉分析放到流水线里做 —— 那里是异步的，不会卡住轮询。
+            path = ""
+            try:
+                from app.media import crop_region
+
+                path = str(crop_region(png, r.pixel_box, tag=f"{r.kind}_{i}")[0])
+            except Exception:
+                log.exception("裁图失败")
+            out.append(Observed(
+                side=r.side,
+                text="[图片]" if r.kind == "image" else "[视频]",
+                top=r.top,
+                media=r.kind,
+                media_box=r.pixel_box,
+                media_path=path,
+            ))
+        return out
+
     def _read_messages(self, chat: str) -> list[Observed]:
         """读当前会话的消息。
 
@@ -445,7 +473,29 @@ class MacWeChatVisionChannel:
                      title, chat)
             self._last_msgs.pop(chat, None)           # 会话被切走，基线作废
             return []
-        return parse_messages(boxes, self.layout, win.w, win.h)
+        # 顺序很重要：**先找媒体区域，再解析文字**。
+        # 因为商家发来的图片里往往有印刷文字（型号、单号、表格），OCR 会把
+        # 它读出来当成一条独立消息（实测收到过 '2204～. ©②'）。
+        # 先拿到图片的位置，就能把这些碎片剔掉 —— 图片本身有视觉描述，
+        # 这些碎片只会干扰模型。
+        media = self._read_media(path, boxes, win)
+        kept_boxes = boxes
+        if media:
+            scale = screen.image_size(path)[0] / win.w if win.w else 2.0
+            def _in_media(b) -> bool:
+                px, py = b.cx * win.w * scale, (1 - b.cy) * win.h * scale
+                for r in media:
+                    x0, y0, x1, y1 = r.media_box
+                    if x0 - 6 <= px <= x1 + 6 and y0 - 6 <= py <= y1 + 6:
+                        return True
+                return False
+
+            kept_boxes = [b for b in boxes if not _in_media(b)]
+
+        msgs = parse_messages(kept_boxes, self.layout, win.w, win.h)
+        if media:
+            msgs = sorted(msgs + media, key=lambda m: -m.top)
+        return msgs
 
     def poll(self) -> list[IncomingMessage]:
         """读取监听列表里各会话的新消息。只返回对方发来的。"""
@@ -495,6 +545,9 @@ class MacWeChatVisionChannel:
                     text=text,
                     is_group=bool(m.sender) if m else False,
                     mentioned_bot=True,
+                    media=m.media,
+                    media_box=m.media_box,
+                    media_path=m.media_path,
                     received_at=now_iso(),
                 ))
             _save_state(self.state)

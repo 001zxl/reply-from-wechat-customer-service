@@ -72,6 +72,10 @@ class IncomingMessage(BaseModel):
     is_group: bool = False
     is_self: bool = False
     mentioned_bot: bool = False
+    # 非文字消息：kind 是 "image"/"video"，box 是截图内的像素框 (x0,y0,x1,y1)
+    media: str = ""
+    media_box: tuple[int, int, int, int] | tuple = ()
+    media_path: str = ""
     received_at: str = Field(default_factory=now_iso)
 
 

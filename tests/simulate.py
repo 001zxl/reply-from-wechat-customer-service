@@ -392,6 +392,58 @@ async def main() -> int:
           "印刷" in _SP or "图片里的字" in _SP)
     check("S17 提示词禁止从碎片里拼单号", "拼凑" in _SP or "绝对不要" in _SP)
 
+    # ---------------- S18 媒体消息检测（图片/视频）-----------------
+    # 真实踩到的坑：直接扫"非背景像素"不可靠 —— 那张打印机照片里有大片
+    # 浅色（拍的白墙），被当成背景，214 点的图片被切成 46/12/13/13 点的
+    # 碎片，一个都认不出来。改成用文字气泡当锚点。
+    from adapters.vision_common import find_media_regions, DEFAULT_LAYOUT
+    from bridge.vision_ocr import TextBox as _TB
+    from PIL import Image as _Im, ImageDraw as _Dr
+
+    _W, _H, _SC = 880, 640, 2.0
+    _lay = DEFAULT_LAYOUT
+    _im = _Im.new("RGB", (int(_W * _SC), int(_H * _SC)), (250, 250, 250))
+    _d = _Dr.Draw(_im)
+    # 一条文字气泡（y 150~185 逻辑点）
+    _d.rectangle([int(380*_SC), int(195*_SC), int(700*_SC), int(230*_SC)], fill=(255,255,255))
+    # 一张"图片"（y 213~427 逻辑点），里面故意留大片浅色区域
+    _d.rectangle([int(370*_SC), int(213*_SC), int(530*_SC), int(427*_SC)], fill=(40,40,45))
+    _d.rectangle([int(380*_SC), int(360*_SC), int(520*_SC), int(420*_SC)], fill=(248,248,248))
+    # 图片里的印刷文字（OCR 会读出来，位置在图片内部）
+    _d.rectangle([int(390*_SC), int(300*_SC), int(470*_SC), int(312*_SC)], fill=(90,90,90))
+    _shot = str(_ROOT / "data" / "sim_media.png")
+    _im.save(_shot)
+
+    # 喂给它的 OCR 结果：文字气泡 + 图片里的印刷文字
+    _boxes = [
+        _TB(text="单号 773123456789012 到哪儿了",
+            x=400/_W, y=1-(210/_H), w=0.30, h=0.025, conf=0.95),
+        _TB(text="Canon 220V", x=430/_W, y=1-(306/_H), w=0.10, h=0.015, conf=0.9),
+    ]
+    _regions = find_media_regions(_shot, _lay, _W, _H, _boxes, _SC)
+    check("S18 能从聊天区里认出图片", len(_regions) >= 1, f"实际 {len(_regions)} 个")
+    if _regions:
+        _r = _regions[0]
+        _h_pt = (_r.pixel_box[3] - _r.pixel_box[1]) / _SC
+        _w_pt = (_r.pixel_box[2] - _r.pixel_box[0]) / _SC
+        check("S18 图片高度认得准（不能把大片浅色当背景切碎）",
+              _h_pt >= 180, f"实际 {_h_pt:.0f} 点")
+        check("S18 图片宽度认得准", 140 <= _w_pt <= 190, f"实际 {_w_pt:.0f} 点")
+        check("S18 左右判断正确（对方的图在左边）", _r.side == "in", f"实际 {_r.side}")
+
+    # 视觉描述要包成"这是图片"的格式，且必须提醒模型别把图里的字当原话
+    from app.media import _to_message_text
+    _t = _to_message_text("一台打印机的铭牌", "image")
+    check("S18 图片描述带明确前缀", "[商家发来一张图片]" in _t)
+    check("S18 图片描述提醒了以商家文字为准", "以商家文字为准" in _t)
+    _tv = _to_message_text("封面帧内容", "video")
+    check("S18 视频说明这是封面帧", "封面帧" in _tv)
+
+    from app.media import VISION_PROMPT
+    check("S18 视觉提示词要求诚实（看不清就说看不清）", "看不清" in VISION_PROMPT)
+    check("S18 视觉提示词禁止猜商家意图", "不要推测" in VISION_PROMPT)
+    check("S18 视觉提示词要求区分为商地址", "厂商地址" in VISION_PROMPT or "制造商" in VISION_PROMPT)
+
     await pipeline.stop()
 
     # ---------------- S11 安全兜底：不依赖模型给的 intent ----------------

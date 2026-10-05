@@ -10,7 +10,10 @@ openai>=1.60,<3
 cryptography>=42
 
 # --- 图像处理（两个截屏通道都要） ---
+# numpy 用来做媒体区域检测（逐行/逐列像素统计），
+# 纯 Python 遍历 200 万像素太慢，轮询循环扛不住
 Pillow>=10
+numpy>=1.26
 
 # --- macOS 截屏通道（只在 macOS 上装） ---
 # WECHAT_CHANNEL=macos_wechat 时需要
