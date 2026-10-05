@@ -444,6 +444,31 @@ async def main() -> int:
     check("S18 视觉提示词禁止猜商家意图", "不要推测" in VISION_PROMPT)
     check("S18 视觉提示词要求区分为商地址", "厂商地址" in VISION_PROMPT or "制造商" in VISION_PROMPT)
 
+    # ---------------- S19 读消息前要滚到底 ----------------
+    # 真实踩到的坑：商家发了一张截图，程序读了两次都还是旧内容 ——
+    # 因为聊天区没停在最新消息处，新消息在可视区下方，截屏看不到。
+    # _open_conversation 在标题已匹配时直接返回、不点也不聚焦，所以
+    # 连"点一下让它跟随"都没有。结果就是**商家发了消息机器人永远不知道**。
+    from adapters.macos_vision import MacWeChatVisionChannel
+    from app.config import settings as _st
+
+    check("S19 默认开启'读前滚到底'", _st.scroll_to_bottom is True)
+    check("S19 滚动格数可配置且为正", _st.scroll_clicks > 0)
+    check("S19 适配器提供了滚动方法",
+          hasattr(MacWeChatVisionChannel, "scroll_chat_to_bottom"))
+
+    import inspect as _insp
+    _src = _insp.getsource(MacWeChatVisionChannel._read_messages)
+    check("S19 _read_messages 里真的调用了滚动", "scroll_chat_to_bottom" in _src)
+    _ssrc = _insp.getsource(MacWeChatVisionChannel.scroll_chat_to_bottom)
+    check("S19 滚动前先聚焦（否则滚轮打到别的 App）", "self.focus()" in _ssrc)
+
+    from pathlib import Path as _P
+
+    _envtxt = (_ROOT / ".env.example").read_text(encoding="utf-8")
+    check("S19 配置模板里有 WECHAT_SCROLL_TO_BOTTOM",
+          "WECHAT_SCROLL_TO_BOTTOM=" in _envtxt)
+
     await pipeline.stop()
 
     # ---------------- S11 安全兜底：不依赖模型给的 intent ----------------

@@ -135,6 +135,20 @@ class Settings:
         default_factory=lambda: int(_env("CIRCUIT_BREAKER_COOLDOWN_MINUTES", "30") or 30)
     )
 
+    # 读消息前先把聊天区滚到底。
+    # ★ 为什么必须：截屏只能看到当前可见的部分。如果聊天区没停在最新消息处
+    #   （人在翻历史、WeChat 没自动跟随、窗口在后台），新消息就在可视区下方，
+    #   read_messages 完全看不到 —— 商家发了消息机器人永远不知道。
+    # 代价：如果人在用这台机器的微信翻历史，会被拉到底部。生产环境建议
+    # 这台机器专用于机器人。
+    scroll_to_bottom: bool = field(
+        default_factory=lambda: _env("WECHAT_SCROLL_TO_BOTTOM", "1") not in ("0", "false", "no")
+    )
+    # 滚到底时滚轮的格数（够覆盖一屏即可）
+    scroll_clicks: int = field(
+        default_factory=lambda: int(_env("WECHAT_SCROLL_CLICKS", "18") or 18)
+    )
+
     # 6. 打字节奏：粘贴完成到点发送之间停一下，停多久跟字数相关
     typing_simulation: bool = field(
         default_factory=lambda: _env("TYPING_SIMULATION", "1") not in ("0", "false", "no")

@@ -38,7 +38,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from app.config import ROOT
+from app.config import ROOT, settings
 from app.schemas import IncomingMessage, now_iso
 from bridge import ax, guard, screen
 from bridge.vision_ocr import TextBox, group_lines, line_text, ocr_image
@@ -447,6 +447,49 @@ class MacWeChatVisionChannel:
             ))
         return out
 
+    def scroll_chat_to_bottom(self, win) -> bool:
+        """把聊天区滚到最新消息。
+
+        ★ 这一步是**必须的**，不是优化。
+        截屏只能看到当前可见区域。如果聊天区没停在最新消息处，新消息就在
+        可视区下方，read_messages 什么都看不到 —— 商家发了消息机器人永远
+        不知道。实测遇到过：商家发了张截图，程序读了两次都还是旧内容，
+        手动滚一下才出现。
+
+        返回是否发生了滚动（画面变了）。
+        """
+        # 先截一张"动作前"的图。注意要**在 focus 之前**截 ——
+        # 实测聚焦微信这个动作本身就会让它跳到底部（微信的行为），
+        # 如果在 focus 之后才截，比较结果永远是"没变化"，看着像没生效。
+        before_hash = None
+        try:
+            b = screen.capture_window(win.window_id, self.shot_dir / "before_scroll.png")
+            before_hash = hashlib.md5(Path(b).read_bytes()).hexdigest()
+        except Exception:
+            pass
+
+        # ★ 必须先聚焦。滚轮事件只对**前台窗口**生效 ——
+        #   不聚焦的话滚轮会打到别的 App 上，画面纹丝不动（实测踩过）。
+        #   而 open_conversation 在标题已匹配时是直接返回、不点也不聚焦的，
+        #   所以这里必须自己保证。
+        self.focus()
+        time.sleep(0.25)
+
+        # 鼠标放到聊天区中部再滚（放在列表上滚的是会话列表，不是消息）
+        cx = win.x + int(self.layout.chat_left(win.w)
+                         + (win.w - self.layout.chat_left(win.w)) * 0.5)
+        cy = win.y + int(win.h * 0.45)
+        screen.scroll(cx, cy, clicks=-abs(settings.scroll_clicks))
+        time.sleep(0.6)
+
+        if before_hash is None:
+            return True
+        try:
+            after = screen.capture_window(win.window_id, self.shot_dir / "after_scroll.png")
+            return hashlib.md5(Path(after).read_bytes()).hexdigest() != before_hash
+        except Exception:
+            return True
+
     def _read_messages(self, chat: str) -> list[Observed]:
         """读当前会话的消息。
 
@@ -459,6 +502,14 @@ class MacWeChatVisionChannel:
         except RuntimeError:
             log.warning("微信主窗口暂时不可见，本轮跳过")
             return []
+
+        # 先滚到最新消息，否则新消息在可视区下方，我们看不到
+        if settings.scroll_to_bottom:
+            try:
+                if self.scroll_chat_to_bottom(win):
+                    log.debug("聊天区已滚动到底（之前不在最新位置）")
+            except Exception:
+                log.exception("滚动到底失败，继续按当前可见区域读")
 
         path = screen.capture_window(win.window_id, self.shot_dir / "chat.png")
         digest = hashlib.md5(Path(path).read_bytes()).hexdigest()
