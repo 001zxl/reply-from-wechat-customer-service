@@ -506,6 +506,55 @@ async def main() -> int:
     check("S20 media.py 真的把 thinking 参数传下去了",
           'extra_body=extra' in _msrc and 'thinking' in _msrc)
 
+    # ---------------- S21 关键编号交叉核对 ----------------
+    # 起因：视觉模型读密集小字时数字不稳定，而且不会因为不确定就留空。
+    # 实测同一张面单，三次调用给出过三个不同的寄件人电话。
+    # 做法：本地 OCR（数字准）+ 视觉模型（文字强）交叉验证。
+    from app.media import (extract_identifiers, cross_check,
+                           format_cross_check, _looks_like_timestamp)
+
+    # 各家快递单号形态都要认得
+    for wb, why in [("SF123456789012", "顺丰"), ("YT1234567890123", "圆通"),
+                    ("773123456789012", "申通长号"), ("JDAP20569998821", "京东"),
+                    ("EA123456789CN", "EMS"), ("75512345678901", "中通")]:
+        check(f"S21 认得出{why}单号 {wb}", wb in extract_identifiers(wb))
+
+    check("S21 认得出手机号", "13371068550" in extract_identifiers("电话13371068550"))
+
+    # 时间戳不能被当成运单号（实测踩过：2026-07-23 22:38:54 连成 14 位数字）
+    check("S21 时间戳不算运单号", _looks_like_timestamp("20260723223854"))
+    check("S21 轨迹时间戳不会误报",
+          "20260723223854" not in extract_identifiers("20260723223854|"))
+
+    # 两个来源一致 → 可信
+    ck = cross_check("运单号 JDAP20569998821 电话 13371068550",
+                     "面单上写着 JDAP20569998821-1-1- 电话 13371068550")
+    verdicts = {c.value: c.verdict for c in ck}
+    check("S21 两边一致判为『一致』", verdicts.get("JDAP20569998821") == "一致")
+    check("S21 视觉多带后缀也算一致（-1-1-）",
+          verdicts.get("JDAP20569998821-1-1-") == "一致"
+          or any(c.verdict == "一致" and c.value.startswith("JDAP") for c in ck))
+
+    # 只有一边有 → 存疑
+    ck2 = cross_check("快递员电话 18706673436", "快递员电话 18706434836")
+    check("S21 两边不一致时两个都不可信",
+          all(c.verdict != "一致" for c in ck2) and len(ck2) == 2,
+          f"实际 {[(c.value, c.verdict) for c in ck2]}")
+
+    ck3 = cross_check("", "面单上 JDAP20569998821")
+    check("S21 OCR 完全没读到 → 标『仅视觉』不可信",
+          len(ck3) == 1 and ck3[0].verdict == "仅视觉")
+
+    txt = format_cross_check(ck)
+    check("S21 输出里明确写了『可信』", "可信" in txt)
+    check("S21 输出里明确写了『不能据此做任何操作』", "不能据此做任何操作" in txt)
+
+    from app.prompts import SYSTEM_PROMPT as _SP2
+    check("S21 客服提示词讲了怎么用交叉核对结果",
+          "交叉核对" in _SP2 and "可信" in _SP2)
+    check("S21 客服提示词禁止在两个不一致的号码里挑一个",
+          "挑一个" in _SP2 or "不一致" in _SP2)
+
     await pipeline.stop()
 
     # ---------------- S11 安全兜底：不依赖模型给的 intent ----------------

@@ -40,6 +40,7 @@ import base64
 import hashlib
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -314,7 +315,21 @@ async def describe_media(screenshot: str | Path,
                       f"可以再调大些。",
             )
 
+        # 交叉核对：本地 OCR 再读一遍同一张图，和视觉模型的结果对一下。
+        # OCR 是纯本地的，不花钱、几百毫秒。
         text = _to_message_text(raw, kind)
+        try:
+            from bridge.vision_ocr import ocr_image
+
+            ocr_text = "\n".join(b.text for b in ocr_image(str(path)))
+            checks = cross_check(ocr_text, raw)
+            if checks:
+                text += format_cross_check(checks)
+                log.info("编号交叉核对：%s",
+                         "；".join(f"{c.value}={c.verdict}" for c in checks))
+        except Exception:
+            log.exception("交叉核对失败（不影响主流程）")
+
         if use_cache:
             cache = _load_cache()
             cache[digest] = {"raw": raw, "text": text, "at": time.time(),
@@ -346,3 +361,147 @@ def _to_message_text(raw: str, kind: str) -> str:
 def cache_stats() -> dict:
     cache = _load_cache()
     return {"entries": len(cache), "file": str(CACHE_FILE)}
+
+
+# ======================================================================
+# 关键数字交叉核对（OCR × 视觉模型）
+# ======================================================================
+#
+# 为什么要做：视觉模型读密集小字时**数字识别不稳定**，而且它不会因为不
+# 确定就留空 —— 它会给出一个看起来合理的数字。
+#
+# 实测同一张面单，视觉模型在三次调用里给出过三个不同的寄件人电话
+# （1371068550 / 13371068550 / 13371068590），收件人尾号也给错过
+# （7482 vs 实际 7428）。
+#
+# 而本地 OCR 对**清晰的数字**反而更准：
+#     运单号   OCR: JDAP20569998821     视觉: JDAP20569998821-1-1-
+#     电话     OCR: 13371068550        视觉: 13371068550
+#     地址     OCR: 山煮省源安市塘子…   视觉: 山东省潍坊市坊子区北海路  ← 视觉强
+#
+# 所以两个来源**互补**：数字用两个来源交叉验证，文字以视觉为准。
+
+# 运单号候选。各家快递的单号形态：
+#   顺丰 SF + 12位         中通 75/78/68/73 + 12位
+#   圆通 YT + 13位         韵达 3 + 12/13位
+#   京东 JD/JDAP/JDVA… + 数字   申通 77/88/66/55/33 + 10~13位
+#   邮政 EMS 2字母 + 9位数字 + CN
+# ★ 不能用 ：中文在 Unicode 里也算"单词字符"，所以
+#   "电话13371068550" 里的 13371068550 前面没有词边界， 匹配不到。
+#   实测就栽在这 —— 真实面单上数字紧跟在中文标签后面是常态。
+#   改用前后非数字的断言。
+_NB = r"(?<!\d)"      # 前面不是数字
+_NA = r"(?!\d)"       # 后面不是数字
+_WAYBILL_RES = [
+    re.compile(_NB + r"[A-Z]{2,4}\d{9,16}" + _NA),    # JDAP20569998821 / SF123456789012
+    re.compile(_NB + r"[A-Z]{2}\d{9}[A-Z]{2}" + _NA),  # EA123456789CN
+    re.compile(_NB + r"\d{12,16}" + _NA),              # 773123456789012
+]
+_PHONE_RE = re.compile(_NB + r"1[3-9]\d{9}" + _NA)
+
+
+def _norm_id(s: str) -> str:
+    return re.sub(r"[^0-9A-Za-z]", "", s or "").upper()
+
+
+def _looks_like_timestamp(v: str) -> bool:
+    """14 位且形如 YYYYMMDDHHMMSS 的，是时间戳不是运单号。
+
+    实测踩过：轨迹里的 `2026-07-23 22:38:54` 被 OCR 连成
+    `20260723223854`，14 位数字，正好落进运单号正则里。
+    """
+    if len(v) != 14 or not v.startswith("20"):
+        return False
+    try:
+        mm, dd = int(v[4:6]), int(v[6:8])
+        hh, mi, ss = int(v[8:10]), int(v[10:12]), int(v[12:14])
+    except ValueError:
+        return False
+    return (1 <= mm <= 12 and 1 <= dd <= 31
+            and 0 <= hh <= 23 and 0 <= mi <= 59 and 0 <= ss <= 59)
+
+
+def extract_identifiers(text: str) -> set[str]:
+    """从一段文字里抠出运单号、电话这类"必须准确"的编号。"""
+    up = (text or "").upper()
+    out: set[str] = set()
+    for rx in _WAYBILL_RES:
+        for m in rx.finditer(up):
+            v = _norm_id(m.group())
+            if len(v) >= 10 and not _looks_like_timestamp(v):
+                out.add(v)
+    for m in _PHONE_RE.finditer(up):
+        out.add(m.group())
+    return out
+
+
+@dataclass
+class FieldCheck:
+    """一个关键数字的核对结果。"""
+
+    value: str                     # 视觉模型给出的那个
+    ocr_also: bool                 # OCR 也读到了
+    vision_only: bool              # 只有视觉模型读到
+    ocr_only: bool                 # 只有 OCR 读到（视觉漏了）
+
+    @property
+    def verdict(self) -> str:
+        if self.ocr_also and not self.vision_only:
+            return "一致"
+        if self.vision_only:
+            return "仅视觉"
+        return "仅OCR"
+
+
+def cross_check(ocr_text: str, vision_text: str) -> list[FieldCheck]:
+    """把 OCR 和视觉模型读到的编号对一遍。
+
+    匹配规则：归一化后**一个包含另一个**就算同一个。
+    因为视觉模型常常多带后缀（`JDAP20569998821-1-1-`），
+    OCR 读到的是干净的 `JDAP20569998821`。
+    """
+    o = extract_identifiers(ocr_text)
+    v = extract_identifiers(vision_text)
+    if not o and not v:
+        return []
+
+    used_o: set[str] = set()
+    out: list[FieldCheck] = []
+
+    for vid in sorted(v, key=len, reverse=True):
+        hit = None
+        for oid in o:
+            if oid in used_o:
+                continue
+            if vid in oid or oid in vid:
+                hit = oid
+                break
+        if hit:
+            used_o.add(hit)
+            out.append(FieldCheck(value=vid, ocr_also=True,
+                                  vision_only=False, ocr_only=False))
+        else:
+            out.append(FieldCheck(value=vid, ocr_also=False,
+                                  vision_only=True, ocr_only=False))
+
+    for oid in sorted(o - used_o, key=len, reverse=True):
+        out.append(FieldCheck(value=oid, ocr_also=False,
+                              vision_only=False, ocr_only=True))
+    return out
+
+
+def format_cross_check(checks: list[FieldCheck]) -> str:
+    """把核对结果写成给客服模型看的一段话。"""
+    if not checks:
+        return ""
+    lines = ["", "【关键编号交叉核对（系统用两种方式各读了一遍）】"]
+    for c in checks:
+        if c.verdict == "一致":
+            lines.append(f"  · {c.value} —— 两种方式读到的一致 ✅ **可信**")
+        elif c.verdict == "仅视觉":
+            lines.append(f"  · {c.value} —— 只有图片识别读到 ⚠️ **不可信，需和商家核对**")
+        else:
+            lines.append(f"  · {c.value} —— 只有文字识别读到（图片识别没读出来）⚠️ 需核对")
+    lines.append("  规则：标了「可信」的才能直接用；标「不可信/需核对」的"
+                 "只能向商家复述并请他确认，**不能据此做任何操作**。")
+    return "\n".join(lines)
