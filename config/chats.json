@@ -34,6 +34,14 @@
       "merchant_id": "m-001",
       "mode": "review",
       "require_mention_in_group": false
+    },
+    {
+      "channel": "macos_wechat",
+      "channel_chat_id": "测试1",
+      "title": "测试1",
+      "merchant_id": "",
+      "mode": "review",
+      "require_mention_in_group": false
     }
   ]
 }

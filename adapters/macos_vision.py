@@ -54,6 +54,7 @@ from .vision_common import (
     clean_title,
     new_suffix,
     parse_messages,
+    pick_titles,
     title_ok,
 )
 
@@ -408,21 +409,11 @@ class MacWeChatVisionChannel:
         """扫描左侧会话列表，返回会话名清单。
 
         只读名字，不打开任何会话、不读任何聊天内容 —— 这是给"配置白名单"用的。
-        列表里名字会被截断（"某电商福利群6禁广告.."），这里会把省略号剥掉，
-        截断后的前缀仍然能匹配到真实会话（匹配是前缀容忍的）。
+        标题行的挑法（含踩坑说明）见 vision_common.pick_titles。
         """
         with _guarded("scan_chat_list", "会话列表"):
             win = self.main_window()
-            names: list[str] = []
-            for _y, text in self.list_rows(win):
-                m = self._LIST_TIME_RE.search(text)
-                if not m:
-                    continue                     # 没有时间戳的是预览行，不是标题行
-                name = text[: m.start()].strip()
-                name = re.sub(r"[.．·…]+$", "", name).strip()
-                if len(name) >= 2 and name not in names:
-                    names.append(name)
-            return names
+            return pick_titles(self.list_rows(win))
 
     def read_messages(self, chat: str) -> list[Observed]:
         with _guarded("read_messages", chat):

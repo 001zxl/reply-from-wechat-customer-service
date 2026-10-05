@@ -136,7 +136,9 @@ def parse_messages(boxes: list[TextBox], layout: Layout,
     messages: list[Observed] = []
     for block in blocks:
         flat = [b for line in block for b in line]
-        text = "\n".join(line_text(l) for l in block).strip()
+        # 归一非文字消息的 OCR 噪音（语音气泡碎片 → [语音 N秒]），
+        # 否则模型会把 '3"（' 当成商家打的字
+        text = normalize_media_text("\n".join(line_text(l) for l in block).strip())
         if not text or _is_system_line(text):
             continue
         left = min(b.x for b in flat)
@@ -221,6 +223,93 @@ def new_suffix(prev: list[str], cur: list[str]) -> list[str]:
         ):
             return cur[k:]
     return []
+
+# 时长后面跟的引号，OCR 认不准是哪种，全都认
+_TIME_QUOTES = "\"\u201c\u201d'\u2019"
+
+# 语音气泡的 OCR 特征。微信的语音消息只画一个气泡加时长，没有文字，
+# 但 OCR 会从气泡和按钮上读出一堆噪音。实测（2026-10）出现过：
+#     '3"（'      '• 3"'      '• 3" • 转文字'
+# 不归一的话，模型会把这些碎片当成商家打的字。
+VOICE_ARTIFACT_RE = re.compile(
+    r"^[\u2022\u00b7\u3002\s]*\d{1,3}\s*[" + _TIME_QUOTES + r"]?\s*[\uff08(]?\s*$"
+)
+VOICE_MARKERS = ("转文字", "转成文字")
+
+
+def normalize_media_text(text: str) -> str:
+    """把非文字消息的 OCR 噪音归一成明确的占位标记。
+
+    商家发语音/图片是常态，但这些消息没有可读文字，OCR 只会读到气泡边框
+    和按钮上的碎片。不归一的话，模型会把碎片当成商家打的字。
+
+    注意：**图片里的文字是识别不出来的**（那需要图像理解）。
+    OCR 会把图上的印刷字读出来当普通文本，这一层区分不了，
+    靠提示词里的一条规则来兜（见 app/prompts.py 的非文字消息规则）。
+    """
+    t = (text or "").strip()
+    if not t or len(t) > 16:
+        return t                      # 太长的不可能是气泡噪音
+
+    # 语音：短、含"数字+引号"、可能带"转文字"按钮
+    if any(m in t for m in VOICE_MARKERS) or VOICE_ARTIFACT_RE.match(t):
+        m = re.search(r"(\d{1,3})\s*[" + _TIME_QUOTES + r"]", t)
+        secs = f" {m.group(1)}秒" if m else ""
+        return f"[语音{secs}]"
+
+    if t in ("[图片]", "[视频]", "[文件]", "[动画表情]", "[位置]", "[链接]"):
+        return t                      # 已经是占位符
+
+    return t
+
+
+# 会话列表标题后跟的时间戳："10:07" / "昨天" / "昨天 10:07" / "星期三" / "12/25"
+LIST_TIME_RE = re.compile(
+    r"\s*(?:"
+    r"(?:昨天|前天|星期[一二三四五六日])\s*\d{1,2}:\d{2}"
+    r"|\d{1,2}:\d{2}"
+    r"|昨天|前天|星期[一二三四五六日]"
+    r"|\d{1,2}/\d{1,2}"
+    r"|\d{1,2}月\d{1,2}日"
+    r")\s*$"
+)
+
+
+def strip_list_time(text: str) -> str:
+    """去掉会话名尾部的时间戳和省略号，得到干净的名字。"""
+    return re.sub(r"[.．·…]+$", "", LIST_TIME_RE.sub("", text).strip()).strip()
+
+
+# 同一条会话的标题行和预览行之间的纵向间距上限（像素）。
+# 实测：标题到预览约 20px，两条会话之间约 45-65px，取 32 分得开。
+LIST_ROW_GAP = 32.0
+
+
+def pick_titles(rows: list[tuple[float, str]]) -> list[str]:
+    """从会话列表的文字行里挑出"标题行"。
+
+    ★ 这里踩过坑：**不能靠"有没有时间戳"判断标题行。**
+    实测微信列表长这样：
+
+        文件传输助手              ← 没有预览、没有时间，但这就是标题
+        腾讯新闻          20:42   ← 标题
+        油价调整通知               ← 预览
+        测试1                     ← 没有时间，是标题
+        微信团队                   ← 没有时间，是标题
+
+    按时间戳过滤会漏掉一大半会话（实测 5 个只认出 1 个）。
+    正确做法是按纵向间距聚类：挨得近的行属于同一条会话，取最上面那行当标题。
+    """
+    out: list[str] = []
+    prev: float | None = None
+    for y, text in sorted(rows, key=lambda r: r[0]):
+        if prev is None or (y - prev) > LIST_ROW_GAP:
+            name = strip_list_time(text)
+            if len(name) >= 2:
+                out.append(name)
+        prev = y
+    return out
+
 
 def _norm(text: str) -> str:
     """归一化：去掉所有空白和常见分隔符，用于名称比对。

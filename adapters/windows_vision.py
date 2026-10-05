@@ -58,6 +58,7 @@ from .vision_common import (
     clean_title,
     new_suffix,
     parse_messages,
+    pick_titles,
     title_ok,
 )
 
@@ -370,25 +371,10 @@ class WindowsWeChatVisionChannel:
             log.exception("热身失败")
 
     def list_conversations(self) -> list[str]:
-        """扫描会话列表，返回会话名清单（只读名字，不打开会话）。"""
+        """扫描会话列表，返回会话名清单（只读名字，不打开任何会话）。"""
         with _guarded("scan_chat_list", "会话列表"):
-            import re as _re
-
             rect, _ = self._capture("win")
-            names: list[str] = []
-            time_re = _re.compile(
-                r"\s*(?:(?:昨天|前天|星期[一二三四五六日])\s*\d{1,2}:\d{2}"
-                r"|\d{1,2}:\d{2}|昨天|前天|星期[一二三四五六日]"
-                r"|\d{1,2}/\d{1,2}|\d{1,2}月\d{1,2}日)\s*$"
-            )
-            for _y, text in self.list_rows(rect):
-                m = time_re.search(text)
-                if not m:
-                    continue
-                nm = _re.sub(r"[.．·…]+$", "", text[: m.start()].strip()).strip()
-                if len(nm) >= 2 and nm not in names:
-                    names.append(nm)
-            return names
+            return pick_titles(self.list_rows(rect))
 
     def read_messages(self, chat: str) -> list[Observed]:
         """读当前会话消息。**先确认打开的确实是目标会话**，否则跳过。"""

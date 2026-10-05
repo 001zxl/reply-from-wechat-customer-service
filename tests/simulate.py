@@ -305,6 +305,93 @@ async def main() -> int:
     )
     check("S14 熔断暂停期间不发", not v.allowed, f"reason={v.reason}")
 
+    # ---------------- S15 配置漂移：代码用到的变量必须在 .env.example 里 -------
+    # 真实踩过的坑：加完六项风控后，app/config.py 里读 QUIET_HOURS 等变量，
+    # 但 .env.example 里忘了写 —— 客户根本发现不了也配不了这些开关。
+    import json as _json
+    import re as _re
+
+    from app.config import ROOT as _ROOT
+
+    _env_txt = (_ROOT / ".env.example").read_text(encoding="utf-8")
+    _declared = set(_re.findall(r"^([A-Z][A-Z0-9_]+)=", _env_txt, _re.M))
+    _src = "\n".join(
+        f.read_text(encoding="utf-8")
+        for d in ("app", "adapters", "bridge", "integrations", "logistics")
+        for f in (_ROOT / d).rglob("*.py")
+    )
+    _used = set(_re.findall(r'_env(?:_allow_empty)?\(\s*"([A-Z][A-Z0-9_]+)"', _src))
+    _used |= {
+        p["api_key_env"]
+        for p in _json.loads((_ROOT / "config" / "models.json").read_text(encoding="utf-8"))["profiles"]
+        if p.get("api_key_env")
+    }
+    _missing = sorted(_used - _declared)
+    check("S15 代码用到的配置项都在 .env.example 里有说明",
+          not _missing, f"缺：{_missing}")
+
+    for _k in ("QUIET_HOURS", "AUTO_REPLY_MAX_PER_DAY", "REPLY_DELAY_MIN",
+               "SIMILAR_REPLY_WINDOW", "CIRCUIT_BREAKER_FAILURES", "TYPING_SIMULATION"):
+        check(f"S15 风控开关 {_k} 有文档", _k in _declared)
+
+    # ---------------- S16 会话列表标题行识别 ----------------
+    # 真实踩到的坑：原来靠"有没有时间戳"判断标题行，实测微信列表里
+    # 大部分会话（文件传输助手、测试1、微信团队）根本不显示时间，
+    # 5 个会话只认出 1 个。
+    from adapters.vision_common import pick_titles, strip_list_time
+
+    # 这是从真实截图 OCR 出来的行（窗口 880x640）
+    real_rows = [
+        (77.0, "文件传输助手"),
+        (139.0, "腾讯新闻 20:42"),
+        (159.0, "油价调整通知"),
+        (206.0, "测试1"),
+        (271.0, "微信团队"),
+    ]
+    titles = pick_titles(real_rows)
+    check("S16 没有时间戳的会话也要认出来（5 行 → 4 个会话）",
+          titles == ["文件传输助手", "腾讯新闻", "测试1", "微信团队"],
+          f"实际 {titles}")
+    check("S16 预览行不能被当成会话名",
+          "油价调整通知" not in titles)
+    check("S16 时间戳要从会话名里剥掉",
+          strip_list_time("腾讯新闻 20:42") == "腾讯新闻")
+    check("S16 昨天+时间也要剥掉",
+          strip_list_time("某仓库 昨天 10:07") == "某仓库")
+    check("S16 省略号要剥掉",
+          strip_list_time("某电商福利群6禁广告..") == "某电商福利群6禁广告")
+    check("S16 只有标题行的会话不受影响",
+          pick_titles([(100.0, "只有标题")]) == ["只有标题"])
+    check("S16 标题+两行预览仍算一条会话",
+          pick_titles([(100.0, "某客户"), (120.0, "预览一"), (140.0, "预览二")])
+          == ["某客户"])
+    check("S16 间距够大要分成两条会话",
+          pick_titles([(100.0, "会话甲"), (200.0, "会话乙")])
+          == ["会话甲", "会话乙"])
+
+    # ---------------- S17 非文字消息归一 ----------------
+    # 真实采到的样本（2026-10，微信 4.1.13 macOS）：语音气泡被 OCR 读成
+    # '3"（' / '• 3"' / '• 3" • 转文字'，不归一就会被当成商家打的字。
+    from adapters.vision_common import normalize_media_text as _N
+
+    check("S17 语音碎片归一（带括号）", _N('3"（') == "[语音 3秒]")
+    check("S17 语音碎片归一（带圆点）", _N('• 3"') == "[语音 3秒]")
+    check("S17 语音碎片归一（带转文字按钮）", _N('• 3" • 转文字') == "[语音 3秒]")
+    check("S17 两位数时长也对", _N('12"  转文字') == "[语音 12秒]")
+    check("S17 已有占位符不动", _N("[图片]") == "[图片]")
+
+    # 不能误伤真文本 —— 这比漏归一更危险
+    for real in ("单号 773123456789012 到哪儿了", "这个件多少钱", "3件货",
+                 "明天能到吗", "帮我催一下"):
+        check(f"S17 真文本不能被误改：{real[:14]}", _N(real) == real)
+
+    # 提示词必须交代非文字消息怎么处理（图片里的字代码区分不了）
+    from app.prompts import SYSTEM_PROMPT as _SP
+    check("S17 提示词说明了看不到非文字消息的内容", "[语音" in _SP and "[图片]" in _SP)
+    check("S17 提示词警告了图片里的印刷字不能当原话",
+          "印刷" in _SP or "图片里的字" in _SP)
+    check("S17 提示词禁止从碎片里拼单号", "拼凑" in _SP or "绝对不要" in _SP)
+
     await pipeline.stop()
 
     # ---------------- S11 安全兜底：不依赖模型给的 intent ----------------
