@@ -447,6 +447,27 @@ class MacWeChatVisionChannel:
             ))
         return out
 
+    @staticmethod
+    def is_minimized(win) -> bool:
+        """窗口是不是被最小化了。
+
+        ★ 为什么必须检查：`screencapture -l` 抓的是窗口自己的内容，
+        被别的窗口挡住**没关系**（实测截图逐字节相同）。但最小化的窗口
+        不在屏幕上了，截出来可能是残缺画面或空图，而且不报错 ——
+        这种"少读了但看起来正常"最危险，会静默漏消息。
+
+        判断依据：最小化的窗口不会出现在 OnScreenOnly 的窗口列表里。
+        注意：这条路径**没能实测到**（用 AppleScript 让微信最小化
+        静默失败了，AXMinimized 一直是 False），所以只是防御性代码。
+        """
+        try:
+            from Quartz import (kCGWindowListOptionOnScreenOnly,
+                                CGWindowListCopyWindowInfo)
+            onscreen = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, 0) or []
+            return not any(w.get("kCGWindowNumber") == win.window_id for w in onscreen)
+        except Exception:
+            return False        # 查不到就当没最小化，别误拦
+
     def scroll_chat_to_bottom(self, win) -> bool:
         """把聊天区滚到最新消息。
 
@@ -501,6 +522,11 @@ class MacWeChatVisionChannel:
             win = self.main_window()
         except RuntimeError:
             log.warning("微信主窗口暂时不可见，本轮跳过")
+            return []
+
+        # 最小化时截不到完整画面，宁可不读也不要读进残缺内容
+        if self.is_minimized(win):
+            log.warning("微信窗口已最小化，本轮跳过（最小化时截不到完整画面）")
             return []
 
         # 先滚到最新消息，否则新消息在可视区下方，我们看不到
