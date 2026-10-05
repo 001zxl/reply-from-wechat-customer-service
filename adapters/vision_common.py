@@ -613,14 +613,19 @@ def find_media_regions(img_path, layout: Layout, win_w: float, win_h: float,
         fx1, fy1 = px0 + x1, py_top + y1
         center_pt = ((fx0 + fx1) / 2) / scale
         side = "in" if center_pt < (chat_left_pt + win_w) / 2 else "out"
+        # 是不是视频：找叠加在缩略图**上面**的时长标记（如 "0:15"）。
+        # ★ 必须要求它在图片区域内，不能只是"附近"。
+        #   实测踩过：微信聊天里的**时间戳**（"21:10"）和视频时长格式完全一样，
+        #   只要在图片附近就被误判成视频，结果把一张韵达面单说成"视频封面帧"。
+        #   视频时长是画在缩略图左下角的，一定在区域内。
         kind = "image"
         if text_boxes:
             for b in text_boxes:
                 if _DURATION_RE.match(b.text.strip()):
                     bx, by = b.cx * win_w, (1 - b.cy) * win_h
-                    near_x = (fx0 / scale - 40) < bx < (fx1 / scale + 40)
-                    near_y = (fy0 / scale - 40) < by < (fy1 / scale + 40)
-                    if near_x and near_y:
+                    inside_x = (fx0 / scale - 6) < bx < (fx1 / scale + 6)
+                    inside_y = (fy0 / scale - 6) < by < (fy1 / scale + 6)
+                    if inside_x and inside_y:
                         kind = "video"
                         break
         out.append(MediaRegion(

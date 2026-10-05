@@ -439,14 +439,17 @@ def extract_identifiers(text: str) -> set[str]:
 class FieldCheck:
     """一个关键数字的核对结果。"""
 
-    value: str                     # 视觉模型给出的那个
-    ocr_also: bool                 # OCR 也读到了
-    vision_only: bool              # 只有视觉模型读到
-    ocr_only: bool                 # 只有 OCR 读到（视觉漏了）
+    value: str                     # 值（冲突时是视觉模型读到的那个）
+    ocr_also: bool = False         # OCR 也读到了同样的
+    vision_only: bool = False      # 只有视觉模型读到
+    ocr_only: bool = False         # 只有 OCR 读到（视觉漏了）
+    conflict_with: str = ""        # 冲突时，OCR 读到的是这个
 
     @property
     def verdict(self) -> str:
-        if self.ocr_also and not self.vision_only:
+        if self.conflict_with:
+            return "冲突"
+        if self.ocr_also:
             return "一致"
         if self.vision_only:
             return "仅视觉"
@@ -484,9 +487,24 @@ def cross_check(ocr_text: str, vision_text: str) -> list[FieldCheck]:
             out.append(FieldCheck(value=vid, ocr_also=False,
                                   vision_only=True, ocr_only=False))
 
-    for oid in sorted(o - used_o, key=len, reverse=True):
-        out.append(FieldCheck(value=oid, ocr_also=False,
-                              vision_only=False, ocr_only=True))
+    # 剩下的两边各有一些 —— 看看能不能两两配对成"冲突"
+    # （长度相同、只差一两个字符的，多半是同一个号读错了）
+    left_v = [c for c in out if c.vision_only]
+    left_o = sorted(o - used_o, key=len, reverse=True)
+    for c in left_v:
+        best, best_d = None, 99
+        for oid in left_o:
+            if len(oid) != len(c.value):
+                continue
+            d = sum(1 for a, b in zip(oid, c.value) if a != b)
+            if d < best_d:
+                best, best_d = oid, d
+        if best and best_d <= 3:
+            c.conflict_with = best
+            left_o.remove(best)
+
+    for oid in left_o:
+        out.append(FieldCheck(value=oid, ocr_only=True))
     return out
 
 
@@ -498,10 +516,17 @@ def format_cross_check(checks: list[FieldCheck]) -> str:
     for c in checks:
         if c.verdict == "一致":
             lines.append(f"  · {c.value} —— 两种方式读到的一致 ✅ **可信**")
+        elif c.verdict == "冲突":
+            lines.append(
+                f"  · 同一个号两种方式读出来不一样：图片识别={c.value}，"
+                f"文字识别={c.conflict_with}\n"
+                f"    ⚠️ **两个都不能直接用**。数字识别里本地文字识别通常更可靠"
+                f"（结果确定、可复现），但**仍必须找商家确认**。"
+            )
         elif c.verdict == "仅视觉":
             lines.append(f"  · {c.value} —— 只有图片识别读到 ⚠️ **不可信，需和商家核对**")
         else:
             lines.append(f"  · {c.value} —— 只有文字识别读到（图片识别没读出来）⚠️ 需核对")
-    lines.append("  规则：标了「可信」的才能直接用；标「不可信/需核对」的"
+    lines.append("  规则：标了「可信」的才能直接用；标「不可信/需核对/冲突」的"
                  "只能向商家复述并请他确认，**不能据此做任何操作**。")
     return "\n".join(lines)

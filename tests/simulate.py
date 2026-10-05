@@ -545,6 +545,25 @@ async def main() -> int:
     check("S21 OCR 完全没读到 → 标『仅视觉』不可信",
           len(ck3) == 1 and ck3[0].verdict == "仅视觉")
 
+    # 冲突：同一个号两边读出来不一样（实测收件人电话 17566667620 vs 17560667620）
+    ck4 = cross_check("收件人张祥龙17560667620", "收件人张祥龙 17566667620")
+    check("S21 同一号两边不一致判为『冲突』",
+          len(ck4) == 1 and ck4[0].verdict == "冲突",
+          f"实际 {[(c.value, c.verdict, c.conflict_with) for c in ck4]}")
+    check("S21 冲突时两个值都保留下来",
+          ck4 and ck4[0].value == "17566667620" and ck4[0].conflict_with == "17560667620")
+    check("S21 冲突的提示语说明文字识别通常更可靠",
+          "文字识别通常更可靠" in format_cross_check(ck4))
+
+    # 图片可能被误判成视频：聊天时间戳(21:10)和视频时长(0:15)格式一样。
+    # 视频时长叠加在缩略图上，所以判定必须要求"在区域内"，不能只是"附近"。
+    import inspect as _i2
+    from adapters.vision_common import find_media_regions as _fmr
+    _fsrc = _i2.getsource(_fmr)
+    check("S21 视频判定要求时长标记在图片区域内",
+          "inside_x" in _fsrc and "inside_y" in _fsrc)
+    check("S21 不再用 ±40 的'附近'判定", "- 40) < bx" not in _fsrc)
+
     txt = format_cross_check(ck)
     check("S21 输出里明确写了『可信』", "可信" in txt)
     check("S21 输出里明确写了『不能据此做任何操作』", "不能据此做任何操作" in txt)
