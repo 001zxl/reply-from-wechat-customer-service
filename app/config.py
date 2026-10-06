@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -223,10 +224,19 @@ def load_allowed_chats() -> dict:
 
 
 def load_knowledge() -> str:
-    """网点已确认的业务知识（时效、价格、赔付口径）。没有就返回空，模型必须承认不知道。"""
+    """网点已确认的业务知识（时效、价格、赔付口径）。没有就返回空，模型必须承认不知道。
+
+    ★ 注入前先把 HTML 注释 `<!-- ... -->` 整段剥掉。
+      为什么必须剥：`config/knowledge.md` 顶部那段"填写说明"注释里**带着示例值**
+      （"江浙沪互发：次日达"、"月结客户首重 X 元"、"未保价按运费倍数赔付"）。
+      原样注进提示词的话，模型会把示例当成网点的真实口径照说 ——
+      而这个网点的时效/价格/赔付根本没确认过。注释是写给人看的，不该进模型上下文。
+    """
     if not KNOWLEDGE_FILE.exists():
         return ""
-    text = KNOWLEDGE_FILE.read_text(encoding="utf-8").strip()
-    if text.startswith("<!--") and "还没有" in text[:400]:
+    text = KNOWLEDGE_FILE.read_text(encoding="utf-8")
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S).strip()
+    # 注释剥完只剩分隔线和空行的，等于没有知识
+    if not re.sub(r"[-#\s>*_|]", "", text):
         return ""
     return text

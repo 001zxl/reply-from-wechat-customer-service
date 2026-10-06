@@ -245,6 +245,10 @@ WECHAT_SEND_ALLOWLIST=       # 空 = 任何会话都不许发
 移出时会二次确认，因为移出后程序就访问不到那个会话了。
 底层还是 `config/chats.json` 和 `guard.py`，网页只是个方便入口。
 
+> `config/chats.json` **不在仓库里**（已 `.gitignore`）：它写的是你微信里真实的群名/客户名，
+> 属于客户关系，不该进公开仓库。首次使用把 `config/chats.json.example` 复制成
+> `config/chats.json` 即可；不复制也不影响运行，只是白名单为空、什么都不接入（默认拒绝）。
+
 ## 架构
 
 ```
@@ -793,7 +797,8 @@ WECHAT_TRANSCRIBE_VOICE=1     # 默认开
 ├── config/
 │   ├── models.json             模型配置
 │   ├── integrations.json       外部系统配置
-│   ├── chats.json              会话白名单
+│   ├── chats.json              会话白名单（**本地文件，不进仓库**）
+│   ├── chats.json.example      白名单模板（首用时复制成 chats.json）
 │   └── knowledge.md            ★ 网点知识库（价格/时效/赔付口径）
 ├── tests/
 │   ├── simulate.py             离线回归 42 项

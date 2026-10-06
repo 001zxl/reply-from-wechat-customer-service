@@ -55,6 +55,68 @@ RESULTS: list[tuple[str, bool, str]] = []
 _seq = [0]
 
 
+def _check_text_bubble_not_media() -> None:
+    """合成一张聊天区截图：左边一句长文字气泡、下面一张彩色图片。
+
+    期望：只报出图片，不报文字气泡。
+    """
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        check("S23 长文字气泡不被当成图片（需要 Pillow）", False, "没装 Pillow")
+        return
+
+    from adapters.vision_common import DEFAULT_LAYOUT as L, find_media_regions
+    from bridge.vision_ocr import TextBox
+
+    W, H, S = 880, 640, 2                     # 逻辑尺寸 + 2 倍截屏
+    im = Image.new("RGB", (W * S, H * S), (250, 250, 250))
+    d = ImageDraw.Draw(im)
+    cl = int(L.chat_left(W))                  # 聊天区左边界
+    bx0 = cl + 46                             # 对方气泡左边缘
+    box = TextBox
+
+    # 一句四行长文字：气泡底 238，里面画上文字
+    bub = (bx0, 120, bx0 + 400, 120 + 96)
+    d.rounded_rectangle([bub[0] * S, bub[1] * S, bub[2] * S, bub[3] * S],
+                        radius=8 * S, fill=(238, 238, 240))
+    boxes = []
+    for i in range(4):
+        ty = 128 + i * 22
+        d.rectangle([(bx0 + 14) * S, ty * S, (bx0 + 360) * S, (ty + 12) * S],
+                    fill=(20, 20, 20))
+        boxes.append(box(text=f"这是第{i}行比较长的客服回复内容", x=(bx0 + 14) / W,
+                         y=1 - (ty + 12) / H, w=346 / W, h=12 / H))
+
+    # 一张彩色"图片"（花花的，没有平坦的气泡灰），离气泡留出足够空白
+    import random
+    random.seed(7)
+    img_box = (bx0, 320, bx0 + 200, 320 + 150)
+    for y in range(img_box[1], img_box[3]):
+        for x in range(img_box[0], img_box[2], 4):
+            d.rectangle([x * S, y * S, (x + 4) * S, (y + 1) * S],
+                        fill=(random.randint(40, 230), random.randint(40, 230),
+                              random.randint(40, 230)))
+
+    import tempfile
+    from pathlib import Path
+    tmp = Path(tempfile.mkdtemp()) / "sim_chat.png"
+    im.save(tmp)
+
+    regions = find_media_regions(str(tmp), L, W, H, boxes, S)
+    spans = [(r.pixel_box[1] / S, r.pixel_box[3] / S) for r in regions]
+
+    # "整块都落在气泡那一段里" 才算把气泡误报成图。
+    # 不用"顶端落在气泡内"是因为粗阈值检测器会从上一行文字的底边起算，
+    # 检出来的图片框顶端天然会比图片本身高一点（这是既有行为，不是这次的问题）。
+    hit_bubble = [s for s in spans if s[0] >= 110 and s[1] <= 230]
+    hit_image = [s for s in spans if s[0] >= 300]
+    check("S23 长文字气泡不被当成图片", not hit_bubble,
+          f"气泡位置却被整块报成图片：{hit_bubble}")
+    check("S23 真图片照样能报出来", bool(hit_image),
+          f"彩色图片没被检出，只报了 {spans}")
+
+
 def check(name: str, ok: bool, detail: str = "") -> None:
     RESULTS.append((name, ok, detail))
 
@@ -768,6 +830,13 @@ async def main() -> int:
           not title_ok("客户AB群", "客户A"))
     check("S12 完全不同的会话不匹配",
           not title_ok("某旅居兴趣群", "某电商福利群6"))
+
+    # ---------------- S23 长文字气泡不能被当成图片 ----------------
+    # 实测事故：微信文字气泡底色 (238,238,240) 与聊天背景 (250,250,250) 只差 12，
+    # 超过细阈值 10，于是一句三行以上的话（约 154px 高，刚好越过 140px 门槛）
+    # 被整块判成"图片"，正文又被当成图片里的印刷字剔掉 —— 商家问的话直接消失。
+    # 这里用合成截图把它钉死：气泡必须不报图，真图片必须照样报出来。
+    _check_text_bubble_not_media()
 
     # ---------------- 汇总 ----------------
     print("\n" + "=" * 74)

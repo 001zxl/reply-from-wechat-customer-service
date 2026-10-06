@@ -1,11 +1,17 @@
 {
   "_说明": [
-    "只有登记在这里的会话才会被处理，其余一律拒绝（默认拒绝）。",
+    "这是**模板**。真实白名单在 config/chats.json（已被 .gitignore 忽略，不进仓库）。",
+    "为什么要分开：白名单里写的是你微信里真实的群名/客户名，那是你的客户关系，",
+    "不该出现在公开仓库里。首次使用请把这个文件复制成 chats.json。",
+    "",
+    "只有登记在 chats.json 里的会话才会被处理，其余一律拒绝（默认拒绝）。",
     "channel_chat_id 必须和适配层收到的一致，且不能同名歧义。",
     "mode: off=只人工 / review=AI出草稿人工审核 / auto=合规规则内自动发送。",
     "第一轮强烈建议全部用 review，看够 50 条草稿再考虑开 auto。",
     "群聊 require_mention_in_group=true 表示只在被@或消息里带单号时才介入。",
-    "macos_wechat（macOS 截屏通道）的会话不要手写，用命令加：  .venv/bin/python bridge/guard.py allow-chat \"微信里的会话名\"  —— 它是会话白名单，名单外的会话程序一律打不开。"
+    "macos_wechat（macOS 截屏通道）的会话**不要手写**，用命令加：",
+    "    .venv/bin/python bridge/guard.py allow-chat \"微信里的会话名\"",
+    "它是会话白名单，名单外的会话程序一律打不开。"
   ],
   "global": {
     "default_mode": "off"
@@ -32,14 +38,6 @@
       "channel_chat_id": "REPLACE_WITH_open_kfid:REPLACE_WITH_external_userid",
       "title": "示例：微信客服会话（把 open_kfid:external_userid 换掉）",
       "merchant_id": "m-001",
-      "mode": "review",
-      "require_mention_in_group": false
-    },
-    {
-      "channel": "macos_wechat",
-      "channel_chat_id": "测试1",
-      "title": "测试1",
-      "merchant_id": "",
       "mode": "review",
       "require_mention_in_group": false
     }

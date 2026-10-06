@@ -102,6 +102,11 @@ def _classify(box: TextBox, in_left: float, out_right: float) -> str:
 SYSTEM_LINE_RE = re.compile(
     r"^(\d{1,2}月\d{1,2}日|\d{4}年\d{1,2}月\d{1,2}日|\d{1,2}:\d{2}|昨天|今天|星期[一二三四五六日])"
     r"|撤回了一条消息|邀请.*加入|开启了朋友验证|以上是打招呼"
+    # ★ 微信的「N条新消息」浮层和「回到最新」箭头也是界面元素，不是消息。
+    #   实测它会被 OCR 读成 '^26条新消息'，而且因为贴右边被判成 side=out。
+    #   判成 out 侥幸不会触发回复，但不能靠这个侥幸 —— 一旦分类抖动成 in，
+    #   机器人就会对着一句"26条新消息"给商家编回复。直接当系统行扔掉。
+    r"|条新消息|回到最新|以下是新消息"
 )
 
 
@@ -530,13 +535,30 @@ def find_media_regions(img_path, layout: Layout, win_w: float, win_h: float,
     if arr.size == 0:
         return []
 
-    # 背景色：取聊天区右上角一小块（一定是纯背景，不会压到消息）
-    pby0, pby1 = 4, min(arr.shape[0], 40)
-    pbx0 = int(arr.shape[1] * 0.6)
-    if pby1 > pby0 and arr.shape[1] > pbx0:
-        bg = np.median(arr[pby0:pby1, pbx0:].reshape(-1, 3), axis=0).astype(np.int16)
-    else:
-        bg = np.array([250, 250, 250], dtype=np.int16)
+    # 背景色：取聊天区**左侧竖条**的中位数。
+    #
+    # ★ 这里踩过一次很贵的坑，别再改回"右上角取样"：
+    #   会话里有未读时，微信会在聊天区右上角浮出一个绿色的「N条新消息」
+    #   药丸（还有"回到最新"的箭头）。右上角取样正好压到它上面，
+    #   实测背景被算成 (242,242,242) 而不是真值 (250,250,250)。
+    #   后果不是"稍微不准"，而是**灾难性**：背景像素与错误 bg 的差
+    #   |250-242|*3 = 24 已经超过细阈值 10，于是**整屏每一个像素都被判成
+    #   "有内容"**，检测器吐出一个 612x769 的假媒体区块，把那一屏所有
+    #   真实消息全吞掉（表现为"明明有消息却只读出 2 条"）。
+    #
+    #   左侧竖条永远是背景：对方气泡（文字和图片一律）都从 in_left
+    #   （chat_left+58pt）开始排，左边的留白没有任何东西会压上去。
+    sbx0 = max(0, int(4 * scale))
+    sbx1 = min(arr.shape[1], int(44 * scale))
+    if sbx1 > sbx0 + 4 and arr.shape[0] > 8:
+        bg = np.median(arr[:, sbx0:sbx1].reshape(-1, 3), axis=0).astype(np.int16)
+    else:                                   # 窗口窄到没有留白，退回老办法
+        pby0, pby1 = 4, min(arr.shape[0], 40)
+        pbx0 = int(arr.shape[1] * 0.6)
+        if pby1 > pby0 and arr.shape[1] > pbx0:
+            bg = np.median(arr[pby0:pby1, pbx0:].reshape(-1, 3), axis=0).astype(np.int16)
+        else:
+            bg = np.array([250, 250, 250], dtype=np.int16)
 
     # 每个检测器的结果分开收集。
     # ★ 为什么分开：同一个检测器内部需要合并（照片会被内部浅色区切碎），
@@ -545,7 +567,12 @@ def find_media_regions(img_path, layout: Layout, win_w: float, win_h: float,
     groups: list[list[tuple[int, int, int, int]]] = []
 
     # ---- 检测一：细阈值按行扫（截图类） ----
+    # 先把 OCR 认出来的文字块（含气泡内边距）从"内容"里挖掉，否则整句长文字
+    # 会被当成图片 —— 详见 _text_mask 的说明。
     fine = _content_mask(arr, bg, _MEDIA_PIXEL_DIFF)
+    if text_boxes:
+        fine = fine & ~_text_mask(arr.shape, arr, text_boxes, layout, win_w, win_h,
+                                  scale, px0, py_top, bg)
     g1: list[tuple[int, int, int, int]] = []
     for y0, y1 in _row_runs(fine, scale):
         box = _tighten_box(fine, y0, y1, px0, px_end, scale, MEDIA_MIN_HEIGHT)
@@ -637,6 +664,95 @@ def find_media_regions(img_path, layout: Layout, win_w: float, win_h: float,
             pixel_box=(fx0, fy0, fx1, fy1),
         ))
     return out
+
+
+def _bubble_fill(arr, text_boxes, layout: Layout, win_w: float, win_h: float,
+                 scale: float, px0: int, py_top: int, bg) -> "object":
+    """采出微信**文字气泡的底色**（对方灰 / 自己绿）。采不到返回 None。
+
+    采法：在每行文字的左边 6 点、右边 6 点各取 7x7 一小块，
+    **只收"平坦且明显不是聊天背景"的那些**：
+      · 平坦（标准差小）→ 排除照片里花花绿绿的地方；
+      · 不是聊天背景 → 排除发言人名字那种直接写在背景上的字
+        （第一版没加这条，采出来的是 (250,250,250) 聊天背景，
+         于是所有判断全错）。
+    剩下的取中位数，就是气泡底色。
+    """
+    import numpy as np
+    if not text_boxes:
+        return None
+    vals = []
+    for b in text_boxes:
+        if not b.text.strip():
+            continue
+        y = int((1 - b.cy) * win_h * scale) - py_top
+        if not (4 <= y < arr.shape[0] - 4):
+            continue
+        for x_pt in (b.x * win_w - 6, b.right * win_w + 6):
+            x = int(x_pt * scale) - px0
+            if not (4 <= x < arr.shape[1] - 4):
+                continue
+            patch = arr[y - 3:y + 4, x - 3:x + 4].reshape(-1, 3).astype(np.int16)
+            med = np.median(patch, axis=0)
+            if float(med.std()) > 6.0:
+                continue                                  # 不平坦 → 是图片内容
+            if int(np.abs(med - np.asarray(bg, dtype=np.int16)).sum()) <= 12:
+                continue                                  # 就是聊天背景 → 这行字不在气泡里
+            vals.append(med)
+    if len(vals) < 4:
+        return None
+    return np.median(np.array(vals), axis=0).astype(np.int16)
+
+
+def _text_mask(shape, arr, text_boxes, layout: Layout, win_w: float, win_h: float,
+               scale: float, px0: int, py_top: int, bg) -> "object":
+    """把"文字气泡"整块标出来（气泡底色 + 里面的文字），供细阈值检测器挖掉。
+
+    ★ 为什么必须有它（实测踩到的坑，代价很大）：
+      微信**文字气泡的底色是 (238,238,240)**，聊天背景是 (250,250,250)，
+      只差 12 —— 早就超过细阈值 10 了。于是"非背景像素"把整个气泡都算进去，
+      一句三行以上的话（约 154px 高，刚好越过 MEDIA_MIN_HEIGHT=140px）
+      会被整块判成**图片**。
+
+      后果不是"多报一块"，而是 `_read_messages` 会把落在图片区域内的文字块
+      全部剔掉（本意是去掉图片里的印刷字）—— 商家问的那句话就此消失，
+      在机器看来只剩一张 "[图片]"。**静默丢消息**，最危险的一种失效。
+
+    ★ 关键是**只挖"颜色正好是气泡底色"的像素**（外框按每行文字扩 30x14 点）。
+      第一版不加这个颜色约束，把照片/面单/聊天截图里的文字也一起挖穿了，
+      真图片全被漏掉（实测检出从 112 次掉到 15 次）。加上颜色约束之后：
+        · 文字气泡：整块底色被挖空 → 每行字各自变成一个矮块 → 都不到 140px → 不成图 ✓
+        · 白底面单截图：底是 255，跟气泡灰 238 差 51 → 挖不掉 → 照样检出 ✓
+        · 聊天截图类图片：里面虽然也有气泡灰，但气泡之间的白底留得住 → 照样检出 ✓
+        · 包裹照片：花花的，没有平坦的气泡灰 → 照样检出 ✓
+
+      只给**细阈值检测器**用。粗阈值检测器本来就是拿文字气泡当锚点的，
+      喂掩码反而会失灵。
+    """
+    import numpy as np
+    m = np.zeros(shape[:2], dtype=bool)
+    if not text_boxes:
+        return m
+    fill = _bubble_fill(arr, text_boxes, layout, win_w, win_h, scale, px0, py_top, bg)
+    if fill is None:
+        return m
+
+    wide = np.zeros(shape[:2], dtype=bool)
+    pad_x, pad_y = 30.0, 14.0
+    for b in text_boxes:
+        if not b.text.strip():
+            continue
+        x0 = int((b.x * win_w - pad_x) * scale) - px0
+        x1 = int((b.right * win_w + pad_x) * scale) - px0
+        y0 = int(((1 - (b.cy + b.h / 2)) * win_h - pad_y) * scale) - py_top
+        y1 = int(((1 - (b.cy - b.h / 2)) * win_h + pad_y) * scale) - py_top
+        x0, y0 = max(0, x0), max(0, y0)
+        x1, y1 = min(m.shape[1], x1), min(m.shape[0], y1)
+        if x1 > x0 and y1 > y0:
+            wide[y0:y1, x0:x1] = True
+
+    near_fill = np.abs(arr - fill).sum(axis=2) <= 12
+    return wide & near_fill
 
 
 # 视频封面上的时长标记，如 "0:15" / "1:02:33"

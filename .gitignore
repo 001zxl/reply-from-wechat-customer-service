@@ -2,6 +2,10 @@
 __pycache__/
 *.pyc
 .env
+# 真实会话白名单（含你的客户/群名）不进仓库，模板见 config/chats.json.example
+config/chats.json
+
+# 采集到的聊天语料（含真实单号、客户信息）
 data/
 *.db
 *.db-wal
