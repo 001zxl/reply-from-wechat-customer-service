@@ -323,7 +323,8 @@ cp .env.example .env
 ### 常用命令
 
 ```bash
-./run.sh sim        # 离线回归 42 项（不花钱）
+./run.sh sim        # 离线回归 203 项（不花钱）
+.venv/bin/python tests/review_reproduce.py   # 外部审查的 13 个反例（必须全部 NOT REPRODUCED）
 ./run.sh biz        # 业务场景 18 条（会调用模型）
 ./run.sh talk       # 多轮真实对话 3 段
 ./run.sh live       # 模型契约测试 4 条
@@ -742,7 +743,8 @@ WECHAT_TRANSCRIBE_VOICE=1     # 默认开
 
 | 测试 | 内容 | 结果 |
 |---|---|---|
-| `./run.sh sim` | 离线回归 42 项（去重/合并/指代/接管/拦截/OCR抖动/元话语…） | ✅ **42/42** |
+| `./run.sh sim` | 离线回归 203 项（去重/合并/指代/接管/拦截/OCR抖动/元话语/身份/互斥/回读/事实校验…） | ✅ **203/203** |
+| `tests/review_reproduce.py` | 外部审查的 13 个反例（全部被正确阻止） | ✅ **0 复现** |
 | `./run.sh biz` | 业务场景 18 条（查件/催派/拦截/改址/时效/报价/外部系统…） | ✅ **18/18** |
 | `./run.sh talk` | 多轮真实对话 3 段（连发/改主意/带情绪/超范围） | ⚠️ **2~3 / 3** |
 | `./run.sh live` | 模型契约 4 条（含提示词注入） | ✅ **4/4** |
@@ -801,7 +803,9 @@ WECHAT_TRANSCRIBE_VOICE=1     # 默认开
 │   ├── chats.json.example      白名单模板（首用时复制成 chats.json）
 │   └── knowledge.md            ★ 网点知识库（价格/时效/赔付口径）
 ├── tests/
-│   ├── simulate.py             离线回归 42 项
+│   ├── simulate.py             离线回归 203 项
+│   ├── review_reproduce.py     外部审查的 13 个反例（回归闸）
+│   ├── review_smoke.py         外部审查的 HTTP 冒烟 6 项
 │   ├── run_business.py         业务场景 18 条
 │   ├── run_conversation.py     多轮对话模拟
 │   └── run_cases.py            模型契约测试

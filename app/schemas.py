@@ -90,6 +90,10 @@ class Decision(BaseModel):
     waybill_numbers: list[str] = Field(default_factory=list, max_length=30)
     reply: str = Field(default="", max_length=800)
     handoff_reason: str = Field(default="", max_length=300)
+    # ★ **不是模型给的字段**，是代码在做事实校验时打的内部标记：
+    #   这条决策引用了上下文中不存在的事实（比如凭空出现的单号），
+    #   整条都不许自动发送，必须转人工审核（外部审查 P1）。
+    grounding_failed: bool = False
 
     @field_validator("waybill_numbers")
     @classmethod

@@ -56,9 +56,13 @@ from .vision_common import (
     _norm,
     _similar,
     clean_title,
+    count_bubbles,
     new_suffix,
     parse_messages,
     pick_titles,
+    send_identity_verdict,
+    title_ambiguous,
+    title_matches_prefix,
     title_ok,
 )
 
@@ -213,7 +217,7 @@ class WindowsWeChatVisionChannel:
         from PIL import Image
 
         w, h = Image.open(path).size
-        from bridge.vision_ocr import TextBox
+        from bridge.ocr_types import TextBox
 
         out: list[TextBox] = []
         for box, text, conf in result:
@@ -257,7 +261,7 @@ class WindowsWeChatVisionChannel:
 
     def _title_from(self, boxes: list[Any], rect: tuple[int, int, int, int]) -> str:
         """从 OCR 结果里取聊天区标题栏的文字。"""
-        from bridge.vision_ocr import group_lines, line_text
+        from bridge.ocr_types import group_lines, line_text
 
         _x, _y, w, h = rect
         chat_left = self.layout.norm_chat_left(w)
@@ -288,7 +292,7 @@ class WindowsWeChatVisionChannel:
 
     def list_rows(self, rect: tuple[int, int, int, int]) -> list[tuple[float, str]]:
         """OCR 出会话列表里可见的每一行，返回 (窗口内 y, 文字)。"""
-        from bridge.vision_ocr import group_lines, line_text
+        from bridge.ocr_types import group_lines, line_text
 
         _x, _y, w, h = rect
         _r, path = self._capture("list")
@@ -308,14 +312,18 @@ class WindowsWeChatVisionChannel:
         return rows
 
     def click_list_row(self, rect: tuple[int, int, int, int], name: str) -> bool:
-        """直接点会话列表里那一行。比走搜索快，也不碰搜索浮层的坑。"""
+        """直接点会话列表里那一行。比走搜索快，也不碰搜索浮层的坑。
+
+        这里用**宽松**匹配 —— 只是在列表里找一行，列表名字被界面截断是常态。
+        点完一定会用 title_ok 严格复核，复核不过就当打开失败。
+        """
         want = _norm(clean_title(name))
         if not want:
             return False
         x, y0, _w, _h = rect
         for y, text in self.list_rows(rect):
             got = _norm(text)
-            if got.startswith(want) or want in got:
+            if title_matches_prefix(text, name) or want in got:
                 self._click(x + self.layout.rail_w + self.layout.list_w * 0.5, y0 + y)
                 time.sleep(1.3)
                 if self._title_matches(name):
@@ -409,6 +417,25 @@ class WindowsWeChatVisionChannel:
             return (self._title_from(boxes, rect),
                     parse_messages(boxes, self.layout, rect[2], rect[3]))
 
+
+    def _detect_mention(self, text: str) -> bool:
+        """群里这条消息是不是**真的**点了我。
+
+        做法：拿自己在微信里的昵称（WECHAT_SELF_NICKNAME）去正文里找 "@昵称"。
+        微信在群里 @ 某人时，被 @ 的人看到的气泡正文里就带着 "@你的昵称"。
+
+        ★ 认不出来就返回 False，**不猜**（外部审查 P2）。
+          第一版直接硬编码 mentioned_bot=True，后果是"大家吃饭了吗"
+          也被当成点你名，一路送进模型排队回复 —— 这是把"只处理 @ 或单号"
+          这条配置规则彻底废掉了。宁可少回一句，也不能在几十人的群里乱开口。
+        """
+        nick = (getattr(self, "self_nickname", "") or "").strip()
+        if not nick:
+            return False
+        t = text or ""
+        return f"@{nick}" in t or f"＠{nick}" in t
+
+
     def poll(self) -> list[IncomingMessage]:
         """读监听列表里各会话的新消息，只返回对方发来的。"""
         out: list[IncomingMessage] = []
@@ -450,10 +477,20 @@ class WindowsWeChatVisionChannel:
                     sender_name=m.sender,
                     text=m.text,
                     is_group=bool(m.sender),
-                    mentioned_bot=True,
+                    mentioned_bot=self._detect_mention(m.text),
                     received_at=now_iso(),
                 ))
         return out
+
+    def _out_texts(self, chat: str) -> list[str]:
+        """当前可见的**己方**气泡文本。发送前后做增量比对用。"""
+        try:
+            self._last_shot.pop(chat, None)
+            return [m.text.strip() for m in self._read_messages(chat)
+                    if m.side == "out" and m.text.strip()]
+        except Exception:
+            log.exception("回读己方气泡失败")
+            return []
 
     # ================= 平台层：键盘 =================
 
@@ -528,8 +565,19 @@ class WindowsWeChatVisionChannel:
                 if not title_ok(self.current_chat_title(), channel_chat_id):
                     if not self.open_conversation(channel_chat_id):
                         return SendResult("failed", f"打不开会话 {channel_chat_id}")
-                    if not title_ok(self.current_chat_title(), channel_chat_id):
-                        return SendResult("failed", "打开后标题仍不匹配，拒绝发送")
+
+                # ★ 身份闸（外部审查 P1）：只认严格相等，不用前缀当凭据；
+                #   当前标题同时像多个已配置会话时直接停。
+                try:
+                    from bridge import guard as _guard
+                    _names = list(dict.fromkeys(
+                        list(settings.send_allowlist) + list(_guard.allowed_chats())))
+                except Exception:
+                    _names = list(settings.send_allowlist)
+                _ok, _why = send_identity_verdict(
+                    self.current_chat_title(), channel_chat_id, _names)
+                if not _ok:
+                    return SendResult("blocked", _why)
 
                 self.focus()
                 rect, _ = self._capture("win")
@@ -549,20 +597,26 @@ class WindowsWeChatVisionChannel:
                 else:
                     time.sleep(0.5)
 
+                # ★ 点发送前先数一遍同文气泡（外部审查 P1）。
+                #   旧消息"…旧单。"能冒充新消息"…新单。"，必须比**新增**。
+                before_n = count_bubbles(self._out_texts(channel_chat_id), text)
+
                 how = self._press_send(rect)
 
-                probe = text.strip()[:14]
-                observed: list[Observed] = []
                 for _ in range(6):
                     time.sleep(0.6)
-                    self._last_shot.pop(channel_chat_id, None)
-                    observed = self._read_messages(channel_chat_id)
-                    if any(m.side == "out" and _similar(probe, m.text[:14])
-                           for m in observed):
-                        self._last_msgs[channel_chat_id] = [m.fingerprint for m in observed]
-                        return SendResult("sent", f"已确认出现在聊天记录里（按钮定位={how}）")
-                return SendResult("unknown",
-                                  f"已点发送，回读 {len(observed)} 条仍未确认，请人工核对（不会自动重发）")
+                    after = self._out_texts(channel_chat_id)
+                    if count_bubbles(after, text) > before_n:
+                        self._last_msgs[channel_chat_id] = [
+                            m.fingerprint for m in self._read_messages(channel_chat_id)]
+                        return SendResult(
+                            "sent",
+                            f"已确认聊天记录里多出这条（发送前已有 {before_n} 条，"
+                            f"按钮定位={how}）")
+                return SendResult(
+                    "unknown",
+                    f"已点发送，回读 6 次都没看到**新增**的这条（发送前已有 {before_n} 条），"
+                    f"结果未知，请人工核对（不会自动重发）")
             except Exception as exc:
                 log.exception("发送失败")
                 return SendResult("unknown", f"发送异常，结果未知：{type(exc).__name__}")

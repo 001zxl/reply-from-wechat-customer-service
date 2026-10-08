@@ -18,6 +18,8 @@
       "label": "网点内部系统（演示）",
       "kind": "command",
       "enabled": true,
+      "_mock说明": "mock=true 表示这是**模拟数据源**。它的结果一律不许对外发送（会被拦成草稿），而且只有 mock 通道 / ALLOW_MOCK_TOOLS=1 时才会注册给模型。接真实系统时不要带这个字段。",
+      "mock": true,
       "description": "查运单的归属网点、业务员、重量、代收货款、客户备注",
       "commands": [
         {

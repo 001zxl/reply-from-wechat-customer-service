@@ -41,10 +41,12 @@ for p in (TEST_DB, Path(str(TEST_DB) + "-wal"), Path(str(TEST_DB) + "-shm"), OUT
 
 from adapters.base import SendResult  # noqa: E402
 from adapters.mock_channel import MockChannel  # noqa: E402
-from app import db  # noqa: E402
+from app import db, policy  # noqa: E402
+from app.llm import CustomerServiceLLM  # noqa: E402
 from app.mock_llm import MockLLM  # noqa: E402
 from app.pipeline import Pipeline  # noqa: E402
-from app.schemas import IncomingMessage, now_iso  # noqa: E402
+from app.llm import LLMOutcome  # noqa: E402
+from app.schemas import Action, Decision, IncomingMessage, Intent, now_iso  # noqa: E402
 
 PRIVATE = "mock:private:merchant-001"
 GROUP = "mock:room:test-room-001"
@@ -821,15 +823,130 @@ async def main() -> int:
     check("S12 发送回读：OCR 认错字也能确认已发出",
           _similar("周末上门取件这个要看", "周未上门取件这个要看"))
 
-    from adapters.macos_vision import title_ok
-    check("S12 配置名是真名的前缀时算同一个会话",
-          title_ok("某电商福利群6禁广告链接", "某电商福利群6"))
-    check("S12 群名带成员数也能匹配",
+    # ---------------- S24 会话身份：前缀不能当发送凭据（外部审查 P1）----------------
+    # title_ok 是**身份判定**，只认"完全相等"或"actual 明显被截断"；
+    # 在列表里**找一行**才用宽松的 title_matches_prefix。
+    # 之前这里是错的：拿前缀当身份，配置"杭州电商客服"就会把消息发进
+    # "杭州电商客服二群"。审查方给了复现脚本，现改成正确语义。
+    from adapters.macos_vision import (send_identity_verdict, title_ambiguous,
+                                       title_matches_prefix, title_ok)
+    from adapters.vision_common import _is_system_line
+    check("S24 前缀相同的另一个群不算同一个会话（★ 发送身份）",
+          not title_ok("杭州电商客服二群", "杭州电商客服"))
+    check("S24 前缀相同的另一个群也不算（另一个方向）",
+          not title_ok("某电商福利群6禁广告链接", "某电商福利群6"))
+    check("S24 群名带成员数仍算同一个（clean_title 会去掉（304））",
           title_ok("某某行业交流群（304）", "某某行业交流群"))
-    check("S12 过短的前缀不算匹配（防串会话）",
+    check("S24 标题确实被界面截断时，前缀才算同一个",
+          title_ok("某某行业交流群（304）…", "某某行业交流群"))
+    check("S24 过短的前缀不算匹配（防串会话）",
           not title_ok("客户AB群", "客户A"))
-    check("S12 完全不同的会话不匹配",
+    check("S24 完全不同的会话不匹配",
           not title_ok("某旅居兴趣群", "某电商福利群6"))
+
+    check("S24 列表查找仍容忍前缀（那只是在找一行）",
+          title_matches_prefix("某电商福利群6禁广告链接", "某电商福利群6"))
+    check("S24 同一标题前缀撞两个会话时判为有歧义",
+          len(title_ambiguous("杭州电商客服二群",
+                              ["杭州电商客服", "杭州电商客服二群"])) > 1)
+
+    ok1, _ = send_identity_verdict("杭州电商客服二群", "杭州电商客服二群",
+                                   ["杭州电商客服", "杭州电商客服二群"])
+    check("S24 身份有歧义时拒绝发送（哪怕目标名写全了）", not ok1)
+    ok2, _ = send_identity_verdict("杭州电商客服二群", "杭州电商客服二群",
+                                   ["杭州电商客服二群"])
+    check("S24 没有歧义时正常放行", ok2)
+    ok3, why3 = send_identity_verdict("杭州电商客服二群", "杭州电商客服",
+                                      ["杭州电商客服"])
+    check("S24 标题与目标不是同一个会话时拒绝发送", not ok3)
+
+    # ---------------- S25 发送回读：旧气泡不能冒充新发送（外部审查 P1）--------------
+    from adapters.vision_common import count_bubbles
+    _old = "收到你的咨询，我帮你看一下旧单。"
+    _new = "收到你的咨询，我帮你看一下新单。"
+    # ★ 关键点：**不能靠文本区分**。"旧单/新单"只差一个字，而 OCR 抖动
+    #   也必须容忍一个字 —— 光看文本，"旧消息"和"新消息认错了一个字"完全一样。
+    #   所以判据是**条数有没有增加**：
+    _before = count_bubbles([_old], _new)
+    check("S25 点了发送但没发出去时，条数不增加 → 不算成功",
+          count_bubbles([_old], _new) == _before)
+    check("S25 真发出去之后条数增加 → 才算成功",
+          count_bubbles([_old, _new], _new) > _before)
+    check("S25 连发两条相同内容时，第二次也能靠条数确认",
+          count_bubbles([_new], _new) == 1
+          and count_bubbles([_new, _new], _new) == 2)
+    # OCR 抖动下仍然认得出是同一条（否则会把发出去的误报成 unknown）
+    check("S25 尾部 OCR 抖动仍能确认",
+          count_bubbles(["收到你的咨询，我帮你看一下新单，"], _new) == 1)
+
+    # ---------------- S26 事实校验没过就不许自动发（外部审查 P1）------------------
+    _llm = object.__new__(CustomerServiceLLM)
+    _d = Decision(action=Action.reply, intent=Intent.other,
+                  waybill_numbers=["773999999999999"],
+                  reply="773999999999999 已经签收了。")
+    _d = _llm._enforce_grounding(_d, [], [], "帮我查一下", [])
+    _v = policy.check_send_policy(
+        mode="auto", takeover_until=None, action=_d.action, intent=_d.intent,
+        reply=_d.reply, logistics_real=False, auto_sent_last_minute=0,
+        last_auto_sent_at=None, inbound_text="帮我查一下",
+        grounding_failed=getattr(_d, "grounding_failed", False))
+    check("S26 正文里凭空出现的单号必须整条转人工", not _v.allowed)
+    check("S26 并且打上 grounding_failed 标记",
+          bool(getattr(_d, "grounding_failed", False)))
+    # 正文干净的合法回复不能被误伤
+    _d2 = Decision(action=Action.reply, intent=Intent.other,
+                   waybill_numbers=["773123456789012"],
+                   reply="773123456789012 我这边看下再回你。")
+    _d2 = _llm._enforce_grounding(_d2, [], [], "773123456789012 到哪了", [])
+    check("S26 有出处的单号不受影响（不能误伤正常回复）",
+          not getattr(_d2, "grounding_failed", False)
+          and _d2.waybill_numbers == ["773123456789012"])
+
+    # ---------------- S27 模拟数据源不许外发（外部审查 P1）------------------------
+    from app.tools import ToolRegistry
+    _reg = ToolRegistry("s27-conv")
+    check("S27 默认不把演示/模拟集成注册给模型",
+          "demo_erp" not in [i.system for i in _reg.integrations])
+    _reg2 = ToolRegistry("s27-conv", allow_mock=True)
+    check("S27 显式允许后才注册（联调用）",
+          "demo_erp" in [i.system for i in _reg2.integrations])
+
+    # 纵深防御：就算显式把模拟工具打开了，它的结果也**不许外发**。
+    # 审查方的复现脚本只证明了"默认不注册"，没证明"拦住" —— 这里补上。
+    _mock_out = await ToolRegistry("s27-conv", allow_mock=True).execute(
+        "call_demo_erp", {"action": "query_waybill", "waybill_no": "773123456789012"})
+    check("S27 模拟来源的工具结果带 mock 标记",
+          bool(_mock_out.mock) and _mock_out.evidence.ok)
+    check("S27 回灌给模型的文本明确标注是模拟数据",
+          "模拟数据源" in _mock_out.text)
+
+    _conv27 = "s27-mock-gate"
+    db.upsert_conversation(_conv27, "mock", _conv27, _conv27, "m", "auto")
+
+    class _MockToolLLM:
+        async def decide(self, **kw):
+            return LLMOutcome(
+                decision=Decision(action=Action.reply, intent=Intent.other,
+                                  reply="负责这票的业务员是张伟，归属杭州余杭一部。"),
+                evidence=[_mock_out.evidence], used_mock=_mock_out.mock)
+
+    _pipe27 = Pipeline(MockChannel(), _MockToolLLM())
+    _, _, _flag27 = await _pipe27._think(
+        _conv27, "谁负责这票", [], db.get_conversation(_conv27), False, "s27-batch")
+    check("S27 引用模拟数据的草稿被打上禁止外发标记", bool(_flag27))
+
+    # ---------------- S28 系统行过滤不能误杀业务句（外部审查 P1）------------------
+    check("S28 「今天客户一直没收到，帮我查一下」不是系统行",
+          not _is_system_line("今天客户一直没收到，帮我查一下"))
+    check("S28 「昨天发的那票客户不要了」不是系统行",
+          not _is_system_line("昨天发的那票客户不要了"))
+    check("S28 「星期一能送到吗」不是系统行",
+          not _is_system_line("星期一能送到吗"))
+    check("S28 但真正的时间分隔线要认出来",
+          all(_is_system_line(t) for t in
+              ["21:11", "9月25日 19:00", "昨天 10:07", "星期三", "12/25", "2026年10月4日 15:30"]))
+    check("S28 未读浮层仍要过滤",
+          _is_system_line("^26条新消息") and _is_system_line("回到最新"))
 
     # ---------------- S23 长文字气泡不能被当成图片 ----------------
     # 实测事故：微信文字气泡底色 (238,238,240) 与聊天背景 (250,250,250) 只差 12，

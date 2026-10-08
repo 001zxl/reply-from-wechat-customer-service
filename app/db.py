@@ -243,17 +243,75 @@ def save_incoming(msg: IncomingMessage, batch_id: str = "") -> Optional[int]:
         return None
 
 
+def label_speaker(direction: str, text: str, sender_name: str, is_group: bool) -> str:
+    """群聊里给正文带上发言人。
+
+    ★ 为什么必须有（外部审查 P1）：群里客服甲发单号、客服乙说"这个退回来"，
+      如果历史只剩两段裸正文，模型只能**猜**"这个"是甲的哪一票 ——
+      猜错就是把乙的诉求登记到甲的运单上，是真会办错事的。
+      私聊不加前缀：来回只有两个人，加了只是噪音。
+    """
+    name = (sender_name or "").strip()
+    if is_group and direction == "in" and name:
+        return f"{name}：{text}"
+    return text
+
+
 def history_before(conv_id: str, before_id: int, limit: int = 20) -> list[dict[str, str]]:
-    """批处理开始之前的历史，不含本批消息，避免和 batch_text 重复。"""
+    """批处理开始之前的历史，不含本批消息，避免和 batch_text 重复。
+
+    群聊会带上发言人（label_speaker）。
+    """
     rows = _conn().execute(
-        """SELECT direction, text FROM messages
+        """SELECT direction, text, sender_name, is_group FROM messages
             WHERE conversation_id=? AND id < ? ORDER BY id DESC LIMIT ?""",
         (conv_id, before_id, limit),
     ).fetchall()
     out = []
     for r in reversed(rows):
         role = "user" if r["direction"] == "in" else "assistant"
-        out.append({"role": role, "content": r["text"]})
+        out.append({"role": role, "content": label_speaker(
+            r["direction"], r["text"], r["sender_name"], bool(r["is_group"]))})
+    return out
+
+
+def _parse_iso(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def recent_incoming_from(conv_id: str, sender_id: str,
+                         window_seconds: int = 180, limit: int = 6,
+                         exclude_id: Optional[int] = None) -> list[str]:
+    """同一会话、同一成员、最近 window_seconds 内发过的入站正文（旧的在前）。
+
+    ★ 用来判断"这句是不是在接着上一句补充"（外部审查 P2）。群里很常见：
+        甲：773123456789012
+        甲：这票不要了退回来          ← 没单号
+    第二句要是因为"没被点名又没单号"被丢掉，等于只处理了一半，
+    而且是**把上下文丢了**，模型看到的批次是残缺的。
+    范围卡得很死：同会话 + 同成员 + 短窗口，不会因此放开全群闲聊。
+    """
+    rows = _conn().execute(
+        """SELECT id, text, received_at FROM messages
+            WHERE conversation_id=? AND direction='in' AND sender_id=?
+            ORDER BY id DESC LIMIT ?""",
+        (conv_id, sender_id, max(1, limit)),
+    ).fetchall()
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(1, window_seconds))
+    out: list[str] = []
+    for r in reversed(rows):
+        if exclude_id is not None and int(r["id"]) == int(exclude_id):
+            continue
+        dt = _parse_iso(r["received_at"] or "")
+        if dt is not None and dt < cutoff:
+            continue          # 时间解析得出来才卡窗口；空时间戳当作"刚发生"
+        out.append(r["text"] or "")
     return out
 
 
@@ -272,16 +330,15 @@ def save_outgoing(conv_id: str, text: str, sender_id: str = "assistant") -> None
 
 def recent_history(conv_id: str, limit: int = 20) -> list[dict[str, str]]:
     rows = _conn().execute(
-        """SELECT direction, text, sender_name FROM messages
+        """SELECT direction, text, sender_name, is_group FROM messages
             WHERE conversation_id=? ORDER BY id DESC LIMIT ?""",
         (conv_id, limit),
     ).fetchall()
     out = []
     for r in reversed(rows):
-        if r["direction"] == "in":
-            out.append({"role": "user", "content": r["text"]})
-        else:
-            out.append({"role": "assistant", "content": r["text"]})
+        role = "user" if r["direction"] == "in" else "assistant"
+        out.append({"role": role, "content": label_speaker(
+            r["direction"], r["text"], r["sender_name"], bool(r["is_group"]))})
     return out
 
 
@@ -306,6 +363,39 @@ def create_draft(
 
 def get_draft(draft_id: int) -> Optional[sqlite3.Row]:
     return _conn().execute("SELECT * FROM outbox WHERE id=?", (draft_id,)).fetchone()
+
+
+# 草稿允许被发送入口占用的状态。
+# ★ 关键：`sending` 和 `unknown` **不在**里面。
+#   · sending = 已经有人在发（或进程崩在这个状态），再发就是重复发送
+#   · unknown = 点了发送但回读没确认，**可能已经发出去了**，绝不能重发
+#   这两种要走人工核实，不能从普通发送入口再来一次（外部审查 P1）。
+SENDABLE_FROM: tuple[str, ...] = ("draft", "approved", "blocked", "failed")
+
+
+def claim_draft(draft_id: int,
+                allowed_from: tuple[str, ...] = SENDABLE_FROM,
+                to: str = "sending") -> bool:
+    """原子占用草稿：只有当前状态在 allowed_from 里，才改成 to。
+
+    返回 True = 抢到了，可以发；False = 别人抢走了 / 状态不允许发。
+
+    为什么必须是**一条带 WHERE 的 UPDATE**（外部审查 P1）：
+      "先 get_draft 看状态，再决定发不发"一定有竞态 —— 两个审核请求
+      同时进来，都读到 status='draft'，然后都发，同一条草稿发两遍。
+      实测就是这样（还顺带把 messages.event_id 的 UNIQUE 约束撞了）。
+      放进一条 UPDATE，由 SQLite 保证只有一个 rowcount=1。
+    """
+    if not allowed_from:
+        return False
+    marks = ",".join("?" for _ in allowed_from)
+    with tx() as c:
+        cur = c.execute(
+            f"UPDATE outbox SET status=?, updated_at=? "
+            f"WHERE id=? AND status IN ({marks})",
+            (to, now_iso(), draft_id, *allowed_from),
+        )
+        return cur.rowcount == 1
 
 
 def update_draft(draft_id: int, **fields: Any) -> None:

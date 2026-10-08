@@ -17,7 +17,10 @@ from typing import Optional
 
 log = logging.getLogger("vision")
 
-from bridge.vision_ocr import TextBox, group_lines, line_text
+# ★ 只从**纯 Python** 的 ocr_types 导入，绝不碰 bridge.vision_ocr ——
+#   那个文件 import Quartz/Vision，一旦被拖进来，Windows 上导入
+#   adapters.windows_vision 就会 ModuleNotFoundError（外部审查 P1）。
+from bridge.ocr_types import TextBox, group_lines, line_text
 
 
 @dataclass
@@ -99,14 +102,34 @@ def _classify(box: TextBox, in_left: float, out_right: float) -> str:
     return "out" if d_out < d_in else "in"
 
 
+# 微信的"系统提示行"：日期分隔线、撤回提示、入群提示、未读浮层。
+# 这些行不是消息，要丢掉。
+#
+# ★ 这里踩过一个很贵的坑（外部审查 P1）：**日期/时间必须整行匹配**。
+#   第一版是 `^(今天|昨天|星期一|\d{1,2}:\d{2}|...)`，只看了句首两个字，
+#   于是下面这些**完整的业务句子**全被判成系统提示、整条丢掉：
+#       "今天客户一直没收到，帮我查一下"
+#       "昨天发的那票客户不要了"
+#       "星期一能送到吗"
+#   商家问的话就这么没了，而且不报错。业务消息就该当业务消息处理。
+_DATE_TOKEN = (r"(?:\d{1,2}月\d{1,2}日|\d{4}年\d{1,2}月\d{1,2}日"
+               r"|\d{1,2}/\d{1,2}|昨天|前天|今天|星期[一二三四五六日])")
+_TIME_TOKEN = r"\d{1,2}:\d{2}(?::\d{2})?"
+# 尾部允许挂一点 OCR 垃圾（实测出现过 "16:29."）
+_TAIL = r"[.。·…、,，\s]*"
+
 SYSTEM_LINE_RE = re.compile(
-    r"^(\d{1,2}月\d{1,2}日|\d{4}年\d{1,2}月\d{1,2}日|\d{1,2}:\d{2}|昨天|今天|星期[一二三四五六日])"
-    r"|撤回了一条消息|邀请.*加入|开启了朋友验证|以上是打招呼"
-    # ★ 微信的「N条新消息」浮层和「回到最新」箭头也是界面元素，不是消息。
-    #   实测它会被 OCR 读成 '^26条新消息'，而且因为贴右边被判成 side=out。
-    #   判成 out 侥幸不会触发回复，但不能靠这个侥幸 —— 一旦分类抖动成 in，
-    #   机器人就会对着一句"26条新消息"给商家编回复。直接当系统行扔掉。
-    r"|条新消息|回到最新|以下是新消息"
+    # ① 日期/时间分隔线：**要么整行就是一个日期**，要么"日期 + 时间"，要么整行就是一个时间
+    rf"^(?:{_DATE_TOKEN}(?:\s*{_TIME_TOKEN})?|{_TIME_TOKEN}){_TAIL}$"
+    # ② 真正的事件提示
+    r"|^.{0,20}撤回了一条消息"
+    r"|^.{0,30}邀请.{0,20}加入.{0,30}$"
+    r"|^开启了朋友验证"
+    r"|^以上是打招呼"
+    # ③ 未读浮层（"^26条新消息" / "回到最新"），只有整行就是它才算
+    rf"|^[\^↑⬆▲\s]*\d+\s*条新消息{_TAIL}$"
+    rf"|^[\^↑⬆▲\s]*回到最新{_TAIL}$"
+    rf"|^以下[是为]新消息{_TAIL}$"
 )
 
 
@@ -214,6 +237,33 @@ def _similar(a: str, b: str, threshold: float = SIMILARITY_THRESHOLD) -> bool:
     if min(la, lb) >= 6 and abs(la - lb) <= 1 and ratio >= 0.72:
         return True
     return False
+
+
+def same_bubble(sent: str, seen: str) -> bool:
+    """刚发出去的那条，和屏幕上新读到的气泡，算不算同一条。
+
+    先整条模糊比；整条因为 OCR 抖动对不上时，退一步比"头 24 字 + 尾 12 字"。
+    两头都对上，基本可以排除"只是前缀相同的另一条消息" ——
+    这正是第一版出问题的地方：只比前 14 个字，旧消息
+    "…我帮你看一下旧单。" 能冒充新消息 "…我帮你看一下新单。"。
+    """
+    a, b = (sent or "").strip(), (seen or "").strip()
+    if not a or not b:
+        return False
+    if _similar(a, b):
+        return True
+    if len(a) >= 20 and len(b) >= 20:
+        return _similar(a[:24], b[:24], 0.85) and _similar(a[-12:], b[-12:], 0.85)
+    return False
+
+
+def count_bubbles(texts, want: str) -> int:
+    """这一屏里有多少条己方气泡跟 want 是同一条。
+
+    数**条数**而不是"有没有"，是为了正确处理"同一条回复连发两次"：
+    只看有没有的话，第二次发出去时屏幕上早就有第一条了，会误判成已发送。
+    """
+    return sum(1 for t in (texts or []) if same_bubble(want, t))
 
 
 def new_suffix(prev: list[str], cur: list[str]) -> list[str]:
@@ -350,13 +400,43 @@ def clean_title(raw: str) -> str:
 
 MIN_PREFIX_MATCH = 4
 
+# 标题尾部被界面截断时会留下的省略号
+TRUNCATED_RE = re.compile(r"[.．·…]{1,}$")
+
 
 def title_ok(actual: str, want: str) -> bool:
-    """读到的标题和配置的名字算不算同一个会话。
+    """★ **身份判定**：读到的标题和配置的名字是不是同一个会话。
 
-    会话列表里的名字会被截断显示（"某电商福利群6禁广告.."），用户配的时候
-    往往只能看到截断版，所以**允许配置名是真名的前缀** —— 但要求至少 4 个字，
-    避免"客户A"误配到"客户AB"上。
+    只允许两种成立：
+      1. 规范化后**完全相等**（群名尾部的成员数已被 clean_title 去掉，
+         所以 "某某行业交流群（304）" 和 "某某行业交流群" 算同一个）
+      2. actual **明显被截断**（尾部有省略号）且 want 是它的前缀
+         —— 截断是微信/OCR 造成的，不是"另一个群"
+
+    ★ 为什么不再无条件允许前缀（外部审查 P1，有复现脚本）：
+      "杭州电商客服" 和 "杭州电商客服二群" 是**两个不同的群**，
+      但按前缀判定会互相通过。这个函数同时被用在发送白名单和发送前
+      身份校验上，一旦配了 "杭州电商客服"，消息就会发进
+      "杭州电商客服二群" —— 允许前缀等于没有身份校验。
+      在左侧列表里**找一行**是另一回事，那是 title_matches_prefix()。
+    """
+    a, w = _norm(clean_title(actual)), _norm(clean_title(want))
+    if not a or not w:
+        return False
+    if a == w:
+        return True
+    if TRUNCATED_RE.search((actual or "").strip()) and len(w) >= MIN_PREFIX_MATCH:
+        return a.startswith(w)
+    return False
+
+
+def title_matches_prefix(actual: str, want: str) -> bool:
+    """宽松匹配：**只用于在会话列表里定位一行**。
+
+    列表里的名字会被界面截断，用户配置时往往也只能看到截断版，
+    所以这里容忍 want 是 actual 的前缀（但要求至少 4 个字）。
+
+    **绝不能拿它当发送/读取的身份凭据** —— 理由见 title_ok。
     """
     a, w = _norm(clean_title(actual)), _norm(clean_title(want))
     if not a or not w:
@@ -364,6 +444,39 @@ def title_ok(actual: str, want: str) -> bool:
     if a == w:
         return True
     return len(w) >= MIN_PREFIX_MATCH and a.startswith(w)
+
+
+def title_ambiguous(actual: str, candidates) -> list[str]:
+    """actual 同时像哪几个候选会话。
+
+    返回多于 1 个就说明**身份有歧义** —— 这时候不许读、不许发。
+    典型场景：配置里同时有"杭州电商客服"和"杭州电商客服二群"，
+    而当前窗口标题是"杭州电商客服二群"（它同时像两个）。
+    """
+    return [c for c in (candidates or []) if title_matches_prefix(actual, c)]
+
+
+def send_identity_verdict(current_title: str, target: str,
+                          configured) -> tuple[bool, str]:
+    """★ 发送前的身份闸（两条通道共用）。
+
+    返回 (是否放行, 拒绝原因)。要**两条都过**才放行：
+      1. 当前窗口标题必须**严格**等于目标会话（title_ok，不许拿前缀当凭据）
+      2. 当前标题不能同时像多个已配置的会话（有歧义就停）
+
+    为什么要有第 2 条：配置里同时有"杭州电商客服"和"杭州电商客服二群"时，
+    窗口标题"杭州电商客服二群"会同时像这两个。就算目标配的是全名，
+    也没有任何依据排除"其实是另一个群被打开着"。宁可停发等人看，
+    也不能赌一把 —— 发错群是不可撤销的。
+    """
+    if not title_ok(current_title, target):
+        return False, (f"当前窗口标题 {current_title!r} 与目标 {target!r} "
+                       f"不是同一个会话，拒绝发送")
+    amb = title_ambiguous(current_title, configured)
+    if len(amb) > 1:
+        return False, (f"当前窗口标题 {current_title!r} 同时像多个会话 {amb}，"
+                       f"身份有歧义，拒绝发送")
+    return True, ""
 
 
 # ======================================================================

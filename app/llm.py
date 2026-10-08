@@ -79,6 +79,10 @@ class LLMOutcome:
     ok: bool = True
     error: str = ""
     logistics_real: bool = False
+    # ★ 本轮有没有用到**任何**模拟/演示数据源（不只物流）。
+    #   只要用了，这条回复就不许外发 —— 演示 ERP 返回的"业务员张伟、
+    #   归属杭州余杭一部"看着和真的一样，模型会当事实说出去（外部审查 P1）。
+    used_mock: bool = False
     latency_ms: int = 0
 
 
@@ -124,6 +128,8 @@ def looks_like_meta(reply: str) -> bool:
 def _force_handoff(decision: Decision, reason: str) -> Decision:
     decision.action = Action.handoff
     decision.handoff_reason = (decision.handoff_reason or reason)[:300]
+    # 事实校验没过 → 打标记，策略层据此禁止自动发送
+    decision.grounding_failed = True
     if not decision.reply.strip():
         decision.reply = "这个我需要跟网点那边核实一下再回你，稍等我确认。"
     return decision
@@ -205,6 +211,7 @@ class CustomerServiceLLM:
         evidence: list[ToolEvidence] = []
         tool_texts: list[str] = []
         logistics_real = False
+        used_mock = False
         rounds = 0
         final_text = ""
 
@@ -251,6 +258,8 @@ class CustomerServiceLLM:
                         tool_texts.append(outcome.text)
                         if outcome.logistics_real:
                             logistics_real = True
+                        if getattr(outcome, "mock", False):
+                            used_mock = True
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tc.id,
@@ -300,6 +309,7 @@ class CustomerServiceLLM:
             return LLMOutcome(
                 decision=decision, evidence=evidence, tool_rounds=rounds,
                 model=self.model, ok=True, logistics_real=logistics_real,
+                used_mock=used_mock,
                 latency_ms=int((time.time() - started) * 1000),
             )
         except Exception as exc:
@@ -312,7 +322,7 @@ class CustomerServiceLLM:
                 ),
                 evidence=evidence, tool_rounds=rounds, model=self.model,
                 ok=False, error=f"{type(exc).__name__}: {exc}"[:300],
-                logistics_real=logistics_real,
+                logistics_real=logistics_real, used_mock=used_mock,
                 latency_ms=int((time.time() - started) * 1000),
             )
 
@@ -366,6 +376,21 @@ class CustomerServiceLLM:
             decision.handoff_reason = (
                 decision.handoff_reason or f"模型引用了上下文中不存在的单号：{','.join(dropped)}"
             )[:300]
+
+        # 1b) ★ **正文**里出现的单号也必须能溯源（外部审查 P1）。
+        #     第一版只清了 waybill_numbers 这个结构化字段，正文原句
+        #     "773999999999999 已经签收了。" 照留，动作还是 reply，
+        #     策略层照样放行 —— 等于完全没拦住，而且那句假话还会被发出去。
+        #     事实校验必须覆盖正文。
+        bad_in_reply = sorted({
+            n for n in WAYBILL_RE.findall(decision.reply or "")
+            if n not in allowed_text
+        })
+        if bad_in_reply:
+            return _force_handoff(
+                decision,
+                f"回复正文里出现了上下文中不存在的单号：{','.join(bad_in_reply)}",
+            )
 
         # 2) 涉及**具体单号**的物流状态，但没有真实查询结果 → 强制人工。
         #    注意这里要求"确实有单号"：像"杭州到南京几天到"这种一般性时效咨询

@@ -161,6 +161,29 @@ class Settings:
         default_factory=lambda: _env("TYPING_SIMULATION", "1") not in ("0", "false", "no")
     )
 
+    # 允许把**模拟/演示数据源**（integrations.json 里标了 "mock": true 的）
+    # 注册给模型。默认关闭 —— 生产环境不该让 AI 调到演示 ERP 并把它返回的
+    # "业务员张伟/归属网点"当成真事实发出去（外部审查 P1）。
+    # 联调/演示时显式打开：ALLOW_MOCK_TOOLS=1
+    allow_mock_tools: bool = field(
+        default_factory=lambda: _env("ALLOW_MOCK_TOOLS", "0") not in ("0", "false", "no", "")
+    )
+
+    # 同一成员的短时连续补充窗口（秒）。
+    # 群里先发单号、再发"这票不要了退回来"是常态，第二句没单号也不该被丢。
+    # 卡在同一个成员 + 这个窗口内，不会因此放开全群闲聊。
+    continuation_window_seconds: int = field(
+        default_factory=lambda: int(_env("CONTINUATION_WINDOW_SECONDS", "180") or 180)
+    )
+
+    # 自己在微信里的昵称。截图通道靠它识别**真实点名**（群里别人 @ 你时，
+    # 气泡正文里会出现 "@昵称"）。
+    # ★ 不配就**认不出来**，此时通道会如实上报 mentioned_bot=False，
+    #   而不是硬编码成 True —— 硬编码的后果是"大家吃饭了吗"也被当成点你名，
+    #   一路送进模型（外部审查 P2）。认不出来时请改用
+    #   chats.json 里的 require_mention_in_group，或依赖"消息里带单号"。
+    self_nickname: str = field(default_factory=lambda: _env("WECHAT_SELF_NICKNAME"))
+
     # 截屏类通道的轮询间隔（秒）。OCR 一次约 0.6s，别设太小。
     poll_interval: float = field(
         default_factory=lambda: float(_env("POLL_INTERVAL_SECONDS", "4") or 4)

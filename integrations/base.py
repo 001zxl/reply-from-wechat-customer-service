@@ -57,6 +57,9 @@ class Integration(Protocol):
     system: str
     label: str
     description: str
+    # ★ 是不是**演示/模拟**数据源（config 里写 "mock": true）。
+    #   模拟来源的结果一律不许外发 —— 见 app/pipeline.py 的 mock_flag。
+    is_mock: bool
 
     def actions(self) -> list[ActionSpec]: ...
 

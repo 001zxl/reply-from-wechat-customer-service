@@ -11,6 +11,7 @@ risk=write 的动作一律不代执行，只登记成待办转人工。
 
 from __future__ import annotations
 
+import logging
 import sys
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -22,6 +23,8 @@ from . import db
 from .prompts import TOOL_DEFINITIONS
 from .schemas import ToolEvidence
 
+log = logging.getLogger("tools")
+
 
 @dataclass
 class ToolOutcome:
@@ -30,14 +33,32 @@ class ToolOutcome:
     logistics_ok: bool = False       # 一个真实物流结果是否成功返回
     logistics_real: bool = False     # 该结果是否来自真实数据源（非 mock）
     waybill_no: str = ""
+    # ★ 这次工具结果是不是来自**模拟/演示**数据源。
+    #   统一在这里标记，而不是只认 query_logistics —— 第一版只查了物流，
+    #   于是"演示 ERP"返回的业务员、归属网点照样被当成真事实发出去
+    #   （外部审查 P1）。任何来源标了 mock，整条草稿都不许外发。
+    mock: bool = False
 
 
 class ToolRegistry:
     def __init__(self, conversation_id: str, logistics_provider: Any | None = None,
-                 integrations: Optional[list[Any]] = None) -> None:
+                 integrations: Optional[list[Any]] = None,
+                 allow_mock: Optional[bool] = None) -> None:
         self.conversation_id = conversation_id
         self.logistics = logistics_provider or get_provider()
-        self.integrations = integrations if integrations is not None else build_integrations()
+        built = integrations if integrations is not None else build_integrations()
+        # ★ 模拟/演示数据源默认**不注册给模型**（外部审查 P1）。
+        #   想让模型能调（联调、演示），显式打 ALLOW_MOCK_TOOLS=1，
+        #   或者在 chats.json 里把会话的 mode 设成 mock 通道。
+        #   就算注册了，它的结果也会被 mock 标记拦住、永远不会真的发出去。
+        from .config import settings as _s
+        if allow_mock is None:
+            allow_mock = bool(getattr(_s, "allow_mock_tools", False))
+        self.integrations = [i for i in built
+                             if allow_mock or not getattr(i, "is_mock", False)]
+        dropped = len(built) - len(self.integrations)
+        if dropped:
+            log.info("已跳过 %d 个模拟/演示集成（未设 ALLOW_MOCK_TOOLS=1）", dropped)
         self._by_tool: dict[str, Any] = {
             f"call_{integ.system}": integ for integ in self.integrations
         }
@@ -166,6 +187,7 @@ class ToolRegistry:
                                  for x in c.get("argv", [])]
 
         result = await integ.run(action, params)
+        is_mock = bool(getattr(integ, "is_mock", False))
         ev = ToolEvidence(
             tool=tool_name,
             arguments=args,
@@ -173,7 +195,11 @@ class ToolRegistry:
             summary=f"{integ.label}/{action} ok={result.ok}"
                     + (f" err={result.error[:80]}" if result.error else ""),
         )
-        return ToolOutcome(text=result.to_model_text(), evidence=ev)
+        text = result.to_model_text()
+        if is_mock and result.ok:
+            # 明确告诉模型这是模拟数据 —— 它不该把演示数据当成真事实陈述
+            text = ("【模拟数据源：仅供联调，不得作为对外答复依据】\n" + text)
+        return ToolOutcome(text=text, evidence=ev, mock=is_mock)
 
     async def _query_logistics(self, args: dict[str, Any]) -> ToolOutcome:
         waybill = str(args.get("waybill_no") or "").strip()
@@ -192,13 +218,15 @@ class ToolRegistry:
                 f"state={result.state or '-'} err={result.error or '-'}"
             ),
         )
+        real = bool(result.ok and result.found
+                    and not result.source.lower().startswith("mock"))
         return ToolOutcome(
             text=result.to_model_text(),
             evidence=ev,
             logistics_ok=bool(result.ok and result.found),
-            logistics_real=bool(result.ok and result.found
-                                and not result.source.lower().startswith("mock")),
+            logistics_real=real,
             waybill_no=waybill,
+            mock=bool(result.ok and result.found and not real),
         )
 
     def _register_case(self, args: dict[str, Any]) -> ToolOutcome:

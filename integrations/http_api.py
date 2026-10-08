@@ -27,6 +27,7 @@ class HttpIntegration:
     def __init__(self, cfg: dict[str, Any]) -> None:
         self.cfg = cfg
         self.system = str(cfg.get("id") or "")
+        self.is_mock = bool(cfg.get("mock"))
         self.label = str(cfg.get("label") or self.system)
         self.description = str(cfg.get("description") or "")
         self.base_url = str(cfg.get("base_url") or "").rstrip("/")

@@ -141,7 +141,12 @@ class Pipeline:
             return SubmitResult(True, "人工接管中，仅记录不回复", msg.conversation_id)
 
         verdict = policy.should_respond(
-            msg, bool(rule.get("require_mention_in_group", True))
+            msg, bool(rule.get("require_mention_in_group", True)),
+            recent_same_sender=db.recent_incoming_from(
+                msg.conversation_id, msg.sender_id,
+                window_seconds=settings.continuation_window_seconds,
+                exclude_id=row_id,
+            ),
         )
         if not verdict.allowed:
             self.stats["ignored"] += 1
@@ -231,12 +236,21 @@ class Pipeline:
 
         evidence = [e.model_dump() for e in outcome.evidence]
 
-        # 用了模拟数据源的草稿必须显眼提示审核人，避免"看着像真轨迹"被直接点发送
-        used_mock = any(
-            e.tool == "query_logistics" and e.summary.lower().startswith("mock")
-            for e in outcome.evidence
+        # 用了模拟数据源的草稿必须显眼提示审核人，避免"看着像真轨迹"被直接点发送。
+        # ★ 覆盖**所有**工具来源，不只物流（外部审查 P1）：
+        #   第一版只认 query_logistics 的 summary 前缀是不是 "mock"，
+        #   于是"演示 ERP"返回的业务员、归属网点照样被当成真事实发出去。
+        reasons: list[str] = []
+        if getattr(outcome, "used_mock", False):
+            reasons.append("模拟/演示数据源给出的信息")
+        # 兜底：模型可能拿到过 mock 物流数据但标记没传上来
+        if any(e.tool == "query_logistics" and e.summary.lower().startswith("mock")
+               for e in outcome.evidence):
+            if "模拟/演示数据源给出的信息" not in reasons:
+                reasons.append("模拟物流数据")
+        mock_flag = (
+            "⚠ 本草稿引用了" + "、".join(reasons) + "，禁止对外发送；" if reasons else ""
         )
-        mock_flag = "⚠ 本草稿引用了模拟物流数据，禁止对外发送；" if used_mock else ""
         return outcome, evidence, mock_flag
 
     async def _process(self, conv_id: str, batch: list[tuple[IncomingMessage, int]],
@@ -278,6 +292,7 @@ class Pipeline:
             recent_replies=db.recent_sent_replies(conv_id),
             recent_all=db.recent_sent_all(),
             mass_send_max_same=3,
+            grounding_failed=bool(getattr(decision, "grounding_failed", False)),
         )
 
         if not allowed.allowed or mock_flag:
@@ -413,16 +428,26 @@ class Pipeline:
             db.update_draft(draft_id, status="failed", send_result="会话不存在")
             return "failed"
 
-        if db.is_human_taken_over(conv_id) and not manual:
-            db.update_draft(draft_id, status="blocked", reason="发送前发现人工已接管")
-            self.stats["blocked"] += 1
-            return "blocked"
-
         if settings.dry_run and not manual:
             db.update_draft(draft_id, status="draft",
                             reason="演练模式（DRY_RUN）不发送，仅出草稿")
             self.stats["drafts"] += 1
             return "draft"
+
+        # ★ 第一步就是**原子占用**（外部审查 P1）。
+        #   不能"先读状态再发"：两个审核请求同时进来会都读到 draft 然后都发。
+        #   占用成功之后这条草稿就是 sending，别处再点也抢不到了。
+        if not db.claim_draft(draft_id):
+            current = db.get_draft(draft_id)
+            st = current["status"] if current else "?"
+            if st == "unknown":
+                # 点过发送但没确认 —— 可能已经发出去了，绝不能自动重发
+                return "unknown_needs_review"
+            if st == "sent":
+                return "already_sent"
+            if st == "sending":
+                return "already_sending"
+            return f"not_sendable({st})"
 
         # ---- 风控 5：随机延迟。固定节奏是典型的机器特征 ----
         if not manual:
@@ -430,12 +455,24 @@ class Pipeline:
             log.debug("随机延迟 %.1fs 后发送", delay)
             await asyncio.sleep(delay)
 
+        # ★ 等待之后必须**重新读一遍**（外部审查 P1）。
+        #   第一版在等待之前读 row，等待之后还拿这个旧快照比版本、比接管 ——
+        #   商家在延迟期间说"先别退了"，或者人工在这期间接管了，它照样发出去。
+        #   延迟（最长 5s）+ 中间任何 await 都是状态会变的窗口。
+        row = db.get_conversation(conv_id)
+        if row is None:
+            db.update_draft(draft_id, status="failed", send_result="会话已不存在")
+            return "failed"
+
+        if not manual and db.is_human_taken_over(conv_id):
+            db.update_draft(draft_id, status="blocked", reason="等待期间人工已接管")
+            self.stats["blocked"] += 1
+            return "blocked"
+
         if expect_version is not None and int(row["version"]) != expect_version:
-            # 思考期间（含随机延迟期间）对方又发了新要求，这条草稿已经过期
+            # 思考/延迟期间对方又发了新要求，这条草稿已经过期
             db.update_draft(draft_id, status="discarded", reason="上下文已变化，草稿作废")
             return "discarded"
-
-        db.update_draft(draft_id, status="sending")
 
         # 半自动通道没有适配器可发 —— 人已经把内容复制到微信里发出去了，
         # 这里只负责记账（写入历史 + 标记已发送），不碰微信。
@@ -521,12 +558,23 @@ class Pipeline:
                       conv_id, n, until, reason)
 
     async def deliver_manual(self, draft_id: int, text: Optional[str] = None) -> str:
-        """人工审核台点"发送"。人工操作不再受自动发送策略限制。"""
+        """人工审核台点"发送"。人工操作不再受自动发送策略限制。
+
+        ★ 状态互斥靠 `db.claim_draft()` 的原子 UPDATE，不再靠"先读再判断"
+          （外部审查 P1）。所以：
+            · 已经在发的（sending）抢不到
+            · 结果未知的（unknown）抢不到 —— 那可能已经发出去了，
+              必须走人工核实，不能从普通发送入口再来一次
+            · 两个审核请求同时点，只有一个抢得到
+        """
         draft = db.get_draft(draft_id)
         if draft is None:
             return "not_found"
         if draft["status"] == "sent":
             return "already_sent"
+        if draft["status"] == "unknown":
+            # 明确拒绝：结果未知的草稿不能从普通入口重发
+            return "unknown_needs_review"
         conv = db.get_conversation(draft["conversation_id"])
         if conv is None:
             return "not_found"
@@ -540,6 +588,27 @@ class Pipeline:
             expect_version=None,
             manual=True,
         )
+
+    async def resolve_unknown(self, draft_id: int, *, actually_sent: bool,
+                              note: str = "") -> str:
+        """人工核实"结果未知"的草稿：确认已发出 → 记为 sent；没发出 → 退回 draft。
+
+        这是 unknown 状态的**唯一出口** —— 不能让普通发送入口碰它，
+        也不能一直挂着。核实过之后再想发，走正常流程。
+        """
+        draft = db.get_draft(draft_id)
+        if draft is None:
+            return "not_found"
+        if draft["status"] != "unknown":
+            return f"not_unknown({draft['status']})"
+        if actually_sent:
+            db.update_draft(draft_id, status="sent",
+                            send_result=f"人工核实已发出。{note}".strip(),
+                            sent_at=now_iso())
+            return "sent"
+        db.update_draft(draft_id, status="draft",
+                        reason=f"人工核实**未**发出，已退回待发。{note}".strip())
+        return "draft"
 
 
 _pipeline: Optional[Pipeline] = None

@@ -5,6 +5,11 @@ __pycache__/
 # 真实会话白名单（含你的客户/群名）不进仓库，模板见 config/chats.json.example
 config/chats.json
 
+# 审查反例脚本产出的本地结果文件
+review_results.json
+review_smoke_results.json
+review_*.log
+
 # 采集到的聊天语料（含真实单号、客户信息）
 data/
 *.db

@@ -142,8 +142,13 @@ def conversation_rule(channel: str, channel_chat_id: str) -> Optional[dict[str, 
     return None
 
 
-def should_respond(msg, require_mention_in_group: bool = True) -> PolicyVerdict:
-    """入站消息是否值得让 AI 开口。群聊默认只在被点名/带单号时介入。"""
+def should_respond(msg, require_mention_in_group: bool = True,
+                   recent_same_sender: Optional[list[str]] = None) -> PolicyVerdict:
+    """入站消息是否值得让 AI 开口。群聊默认只在被点名/带单号时介入。
+
+    `recent_same_sender`：同一成员最近发过的正文（旧的在前），由调用方查库传入。
+    用来识别"接着上一句的补充"，见下面第 4 条。
+    """
     if msg.is_self:
         return PolicyVerdict(False, "自己的消息")
     if not msg.is_group:
@@ -154,6 +159,14 @@ def should_respond(msg, require_mention_in_group: bool = True) -> PolicyVerdict:
         return PolicyVerdict(True)
     if re.search(r"\d{8,}", msg.text):
         return PolicyVerdict(True, "含运单号")
+    # ★ 同一成员的短时连续补充（外部审查 P2）：
+    #   群里先发单号、再发"这票不要了退回来"是极常见的说法，第二句
+    #   既没被点名也没单号。第一版会直接丢掉它，结果是
+    #   **上下文残缺** —— 模型只看到半句话，还可能因此追问已经说过的信息。
+    #   范围卡死：同一个成员 + 短窗口内刚发过带单号的话，才算"接着说的"。
+    for prev in (recent_same_sender or []):
+        if re.search(r"\d{8,}", prev or ""):
+            return PolicyVerdict(True, "同一成员刚发过单号，属连续补充")
     return PolicyVerdict(False, "群聊未被点名且无单号")
 
 
@@ -174,6 +187,7 @@ def check_send_policy(
     recent_replies: Optional[list[str]] = None,
     recent_all: Optional[list[tuple[str, str]]] = None,
     mass_send_max_same: int = 3,
+    grounding_failed: bool = False,
 ) -> PolicyVerdict:
     """能否把这条回复真正发出去。force=True 表示人工在审核台点了发送。"""
     if not reply.strip():
@@ -181,6 +195,13 @@ def check_send_policy(
 
     if force:
         return PolicyVerdict(True, "人工审核后发送")
+
+    # ★ 事实校验没通过的一律不许自动发（外部审查 P1）。
+    #   注意这里**不看 action** —— auto 模式下 handoff 本来也是允许发的
+    #   （"我已经同步给专人了"这种话对商家是有用的），所以只靠
+    #   "转成 handoff" 拦不住虚构单号。必须有一个独立的标记。
+    if grounding_failed:
+        return PolicyVerdict(False, "事实校验未通过（引用了无来源的号码/事实），转人工")
 
     # 第一道闸：文字里出现高风险操作词，一律人工。
     # 这道不依赖模型给的 intent —— 模型把"取消退回"标成 other 也拦得住。
